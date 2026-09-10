@@ -197,6 +197,8 @@ namespace wxl::offsets::engine::gx
     constexpr size_t kGxBatchMinIndex   = 0x0C; // uint16
     constexpr size_t kGxBatchMaxIndex   = 0x0E; // uint16
     constexpr size_t kGxDeviceVertexStream = 0x2870; // -> the bound vertex stream buffer
+    // Gx_PrimIndexPtr (0x00682F10) writes this binding and marks +0x28C0 dirty.
+    constexpr size_t kGxDeviceIndexBuffer = 0x28BC; // -> the bound index GxBuf
     constexpr size_t kGxBufStreamOffset    = 0x18;   // uint32, in bytes
     constexpr size_t kGxBufStreamStride    = 0x0C;   // uint32
     /// Non-zero selects a path that passes a base vertex of zero instead of deriving one, so the

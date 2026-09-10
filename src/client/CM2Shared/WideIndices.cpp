@@ -59,6 +59,16 @@ namespace
     /// Null outside one, which is every draw that is not an M2's.
     const M2SkinSection* g_drawSection = nullptr;
     const M2SkinProfile* g_drawSkin    = nullptr;
+    void* g_drawModel = nullptr;
+    void* g_drawInstance = nullptr;
+
+    // Temporary Beta address experiment: process-lifetime caps, no retained payloads.
+    constexpr uint32_t kSharedRefillLogLimit = 16;
+    constexpr uint32_t kInstanceRefillLogLimit = 16;
+    constexpr uint32_t kVertexRefillLogLimit = 8;
+    constexpr uint32_t kDrawLogLimit = 96;
+    uint32_t g_sharedRefillLogs = 0, g_instanceRefillLogs = 0;
+    uint32_t g_vertexRefillLogs = 0, g_drawLogs = 0;
 
     template <class T>
     T* At(void* base, size_t offset)
@@ -168,6 +178,39 @@ namespace
         return header->bones.count == 1 && (flags & off::kM2FileFlagSingleBoneGlobal) != 0;
     }
 
+    uint32_t DiagnosticFileFlags(void* model)
+    {
+        void* record = model ? *At<void*>(model, off::kOffSharedFileRecord) : nullptr;
+        return record ? *At<uint32_t>(record, off::kOffM2FileFlags) : 0;
+    }
+
+    void LogIndexRefill(bool shared, void* model, void* instance, void* buffer,
+                        const M2SkinProfile& skin, uint32_t section, uint32_t groupOrCopy,
+                        int groupVertexBase, uint16_t refillVertexStart, bool globalIndices,
+                        int16_t bias, uint32_t start, uint32_t count, size_t written,
+                        const uint16_t* emitted)
+    {
+        uint32_t& used = shared ? g_sharedRefillLogs : g_instanceRefillLogs;
+        const uint32_t limit = shared ? kSharedRefillLogLimit : kInstanceRefillLogLimit;
+        if (!NeedsWideVertices(&skin) || section > 1 || used >= limit) return;
+        ++used;
+        const bool triangle = count >= 3 && start <= skin.indexCount
+                              && count <= skin.indexCount - start;
+        const uint16_t* raw = triangle ? skin.indices + start : nullptr;
+        WLOG_INFO("m2wide-beta: refill=%s record=%u model=%p instance=%p skin=%p ib=%p "
+                  "section=%u global=%u flags=0x%08X groupOrCopy=%u groupVertexBase=%d "
+                  "sourceVertexStart=%u refillVertexStart=%u bias=%d sourceIndexStart=%u "
+                  "written=%zu count=%u triangle=%u raw=(%u,%u,%u) emitted=(%u,%u,%u)",
+                  shared ? "shared" : "instance", used, model, instance, &skin, buffer,
+                  section, unsigned(globalIndices), DiagnosticFileFlags(model), groupOrCopy,
+                  groupVertexBase, unsigned(skin.submeshes[section].vertexStart),
+                  unsigned(refillVertexStart), int(bias), start, written, count, unsigned(triangle),
+                  raw ? unsigned(raw[0]) : 0u, raw ? unsigned(raw[1]) : 0u,
+                  raw ? unsigned(raw[2]) : 0u, triangle ? unsigned(emitted[0]) : 0u,
+                  triangle ? unsigned(emitted[1]) : 0u, triangle ? unsigned(emitted[2]) : 0u);
+        wxl::log::Flush();
+    }
+
     /** @brief True while the buffer's contents still stand, which is when a fill is skipped. */
     bool BufferHolds(void* buffer)
     {
@@ -251,6 +294,10 @@ namespace
                 }
                 EmitBlock(dst, skin.indices, TriangleStart(s, skin), s.indexCount,
                           globalIndices ? int16_t(0) : static_cast<int16_t>(vertexBase - static_cast<int16_t>(s.vertexStart)));
+                LogIndexRefill(false, *At<void*>(instance, off::kOffInstModel), instance,
+                               buffer, skin, sectionIndex, g, int(vertexBase), s.vertexStart,
+                               globalIndices, globalIndices ? int16_t(0) : static_cast<int16_t>(vertexBase - static_cast<int16_t>(s.vertexStart)),
+                               TriangleStart(s, skin), s.indexCount, size_t(dst - base), dst);
                 vertexBase = static_cast<int16_t>(vertexBase + static_cast<int16_t>(s.vertexCount));
                 dst += s.indexCount;
             }
@@ -296,6 +343,8 @@ namespace
             for (uint32_t c = 0; c < instanceCopies; ++c)
             {
                 EmitBlock(dst, skin.indices, start, copy.indexCount, bias);
+                LogIndexRefill(true, model, nullptr, buffer, skin, i, c, 0, copy.vertexStart,
+                               globalIndices, bias, start, copy.indexCount, size_t(dst - base), dst);
                 dst += copy.indexCount;
                 bias = static_cast<int16_t>(bias + static_cast<int16_t>(globalIndices ? skin.vertexCount : copy.vertexCount));
             }
@@ -328,6 +377,9 @@ namespace
         if (!source || header->vertices.count < skin.vertexCount) return;
 
         const uint32_t copies = *At<uint32_t>(model, off::kOffSharedInstanceCopies);
+        const bool logRefill = NeedsWideVertices(&skin) && g_vertexRefillLogs < kVertexRefillLogLimit;
+        const uint32_t strideBefore = logRefill ? *At<uint32_t>(buffer, gxoff::kGxBufStreamStride) : 0;
+        const uint32_t offsetBefore = logRefill ? *At<uint32_t>(buffer, gxoff::kGxBufStreamOffset) : 0;
         auto* dst = static_cast<uint8_t*>(LockBuffer(device, buffer));
         if (!dst) return;
 
@@ -359,6 +411,16 @@ namespace
         // The original SharedSetVertices already selected this vertex stream. Do not
         // pass its buffer to PrimIndexPtr: that would replace the device's index source.
         UnlockBuffer(device, buffer);
+        if (logRefill)
+        {
+            ++g_vertexRefillLogs;
+            WLOG_INFO("m2wide-beta: vertex-refill record=%u model=%p skin=%p vb=%p vertices=%u "
+                      "copies=%u strideBefore=%u strideAfter=%u offsetBefore=%u offsetAfter=%u",
+                      g_vertexRefillLogs, model, &skin, buffer, skin.vertexCount, copies,
+                      strideBefore, *At<uint32_t>(buffer, gxoff::kGxBufStreamStride),
+                      offsetBefore, *At<uint32_t>(buffer, gxoff::kGxBufStreamOffset));
+            wxl::log::Flush();
+        }
     }
 
     // Wide skins are noted when their index buffers are filled so the picking hook below can
@@ -422,6 +484,8 @@ namespace
     {
         const M2SkinSection* prevSection = g_drawSection;
         const M2SkinProfile* prevSkin    = g_drawSkin;
+        void* prevModel = g_drawModel;
+        void* prevInstance = g_drawInstance;
 
         auto* context = static_cast<gxoff::DrawBatchContext*>(ctx);
         void* element = context ? context->element : nullptr;
@@ -430,11 +494,15 @@ namespace
         void* shared = context && context->model
                            ? *At<void*>(context->model, off::kOffInstModel) : nullptr;
         g_drawSkin = shared ? *At<M2SkinProfile*>(shared, off::kOffModelSkin) : nullptr;
+        g_drawModel = shared;
+        g_drawInstance = context ? context->model : nullptr;
 
         g_origDrawBatch(ctx, edx);
 
         g_drawSection = prevSection;
         g_drawSkin    = prevSkin;
+        g_drawModel = prevModel;
+        g_drawInstance = prevInstance;
     }
 
     /**
@@ -456,6 +524,11 @@ namespace
      */
     void __fastcall hkDeviceDraw(void* device, void* edx, uint32_t* batch, int indexed)
     {
+        const bool logDraw = indexed && batch && g_drawSection && NeedsWideVertices(g_drawSkin)
+                             && g_drawLogs < kDrawLogLimit;
+        void* diagnosticStream = logDraw ? *At<void*>(device, gxoff::kGxDeviceVertexStream) : nullptr;
+        const uint32_t incomingOffset = diagnosticStream ? *At<uint32_t>(diagnosticStream, gxoff::kGxBufStreamOffset) : 0;
+        const uint32_t incomingStartIndex = logDraw ? *At<uint32_t>(batch, gxoff::kGxBatchStartIndex) : 0;
         if (indexed && batch && g_drawSection && g_drawSkin && g_drawSection->level)
         {
             const M2SkinSection& s = *g_drawSection;
@@ -508,6 +581,37 @@ namespace
                     }
                 }
             }
+        }
+
+        if (logDraw)
+        {
+            ++g_drawLogs;
+            uint32_t section = 0, wideStart = 0;
+            const bool matched = SubmeshIndexOf(*g_drawSection, *g_drawSkin, section);
+            const bool wideValid = matched && WideVertexStart(*g_drawSkin, section, wideStart);
+            void* geo = g_drawInstance ? *At<void*>(g_drawInstance, off::kOffInstGeometryCtx) : nullptr;
+            WLOG_INFO("m2wide-beta: draw record=%u model=%p instance=%p skin=%p boundIb=%p "
+                      "sharedIb=%p instanceIb=%p vb=%p global=%u flags=0x%08X matched=%u section=%u "
+                      "sourceVertexStart=%u copyVertexStart=%u wideValid=%u wideStart=%u stride=%u "
+                      "mode=%u incomingOffset=%u imposedOffset=%u override=%u incomingStartIndex=%u "
+                      "startIndex=%u count=%u min=%u max=%u",
+                      g_drawLogs, g_drawModel, g_drawInstance, g_drawSkin,
+                      *At<void*>(device, gxoff::kGxDeviceIndexBuffer),
+                      g_drawModel ? *At<void*>(g_drawModel, off::kOffSharedIndexBuf) : nullptr,
+                      geo ? *At<void*>(geo, off::kOffGeoCtxIndexBuf) : nullptr, diagnosticStream,
+                      unsigned(g_drawModel && UsesGlobalIndices(g_drawModel)), DiagnosticFileFlags(g_drawModel),
+                      unsigned(matched), section,
+                      matched ? unsigned(g_drawSkin->submeshes[section].vertexStart) : 0u,
+                      unsigned(g_drawSection->vertexStart), unsigned(wideValid), wideStart,
+                      diagnosticStream ? *At<uint32_t>(diagnosticStream, gxoff::kGxBufStreamStride) : 0u,
+                      *At<uint32_t>(device, gxoff::kGxDeviceBaseVertexMode), incomingOffset,
+                      diagnosticStream ? *At<uint32_t>(diagnosticStream, gxoff::kGxBufStreamOffset) : 0u,
+                      unsigned(streamOffset != nullptr), incomingStartIndex,
+                      *At<uint32_t>(batch, gxoff::kGxBatchStartIndex),
+                      *At<uint32_t>(batch, gxoff::kGxBatchIndexCount),
+                      unsigned(*At<uint16_t>(batch, gxoff::kGxBatchMinIndex)),
+                      unsigned(*At<uint16_t>(batch, gxoff::kGxBatchMaxIndex)));
+            wxl::log::Flush();
         }
 
         g_origDeviceDraw(device, edx, batch, indexed);
