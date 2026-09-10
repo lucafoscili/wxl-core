@@ -174,17 +174,23 @@ namespace
         return buffer && *At<uint8_t>(buffer, off::kOffGxBufBuilt) && *At<uint8_t>(buffer, off::kOffGxBufValid);
     }
 
-    /** @brief Locks the index buffer for writing, exactly as the engine fill does. */
+    /** @brief Locks a GPU buffer for writing, exactly as the engine fill does. */
     void* LockBuffer(void* device, void* buffer)
     {
         return wxl::game::gx::Vtbl<off::Gx_BufLockFn>(device, static_cast<unsigned>(off::kGxVtblBufLock / sizeof(void*)))(device, buffer);
     }
 
-    /** @brief Commits the refilled buffer and re-arms the device's index binding, as the engine does. */
-    void CommitBuffer(void* device, void* buffer)
+    /** @brief Finishes a refill without changing which kind of buffer the device has bound. */
+    void UnlockBuffer(void* device, void* buffer)
     {
         wxl::game::gx::Vtbl<off::Gx_BufUnlockFn>(device, static_cast<unsigned>(off::kGxVtblBufUnlock / sizeof(void*)))(device, buffer, 0);
         *At<uint8_t>(buffer, off::kOffGxBufBuilt) = 1;
+    }
+
+    /** @brief Commits an index refill and restores the engine's index binding. */
+    void CommitIndexBuffer(void* device, void* buffer)
+    {
+        UnlockBuffer(device, buffer);
         wxl::game::Native<off::Gx_PrimIndexPtrFn>(off::kPrimIndexPtr)(device, buffer);
     }
 
@@ -249,7 +255,7 @@ namespace
                 dst += s.indexCount;
             }
         }
-        CommitBuffer(device, buffer);
+        CommitIndexBuffer(device, buffer);
     }
 
     /**
@@ -294,7 +300,7 @@ namespace
                 bias = static_cast<int16_t>(bias + static_cast<int16_t>(globalIndices ? skin.vertexCount : copy.vertexCount));
             }
         }
-        CommitBuffer(device, buffer);
+        CommitIndexBuffer(device, buffer);
     }
 
     /**
@@ -350,7 +356,9 @@ namespace
                 }
             }
         }
-        CommitBuffer(device, buffer);
+        // The original SharedSetVertices already selected this vertex stream. Do not
+        // pass its buffer to PrimIndexPtr: that would replace the device's index source.
+        UnlockBuffer(device, buffer);
     }
 
     // Wide skins are noted when their index buffers are filled so the picking hook below can
