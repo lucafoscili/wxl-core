@@ -72,6 +72,23 @@ class WideDiagnosticTests(unittest.TestCase):
         self.assertIn("gxoff::kGxDeviceIndexBuffer", draw)
         self.assertIn("wxl::log::Flush();", draw)
 
+    def test_section_base_override_rejects_global_indices(self):
+        draw = body("hkDeviceDraw")
+        guard = re.search(
+            r"if\s*\(indexed\s*&&\s*g_drawSection\s*&&\s*NeedsWideVertices\(g_drawSkin\)"
+            r"\s*&&\s*g_drawModel\s*&&\s*!UsesGlobalIndices\(g_drawModel\)\)\s*\{", draw)
+        self.assertIsNotNone(guard)
+        start, depth = guard.end(), 1
+        for end in range(start, len(draw)):
+            depth += (draw[end] == "{") - (draw[end] == "}")
+            if depth == 0:
+                break
+        self.assertEqual(depth, 0)
+        self.assertIn("*streamOffset = wideStart * stride;", draw[start:end])
+        # Bypassed global draws still produce the diagnostic evidence.
+        log_gate = draw[draw.index("const bool logDraw"):draw.index(";", draw.index("const bool logDraw"))]
+        self.assertNotIn("UsesGlobalIndices", log_gate)
+
 
 if __name__ == "__main__":
     unittest.main()

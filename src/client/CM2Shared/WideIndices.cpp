@@ -546,11 +546,16 @@ namespace
         // stream's stored offset by its stride. So the offset is what gets set -- the device then
         // computes the base itself, with its own arithmetic, and nothing here reimplements a draw.
         //
+        // Global indices already name their model vertices. Adding a section base again fetches
+        // another section (or past the buffer); preserve the native stream offset on that path.
+        // This does not make uint16 global indices address vertices beyond 65535.
+        //
         // Restored around the call rather than left: the stream is shared by everything that draws
         // after this, and a base meant for one submesh would silently displace all of them.
         uint32_t* streamOffset = nullptr;
         uint32_t  savedOffset  = 0;
-        if (indexed && g_drawSection && NeedsWideVertices(g_drawSkin))
+        if (indexed && g_drawSection && NeedsWideVertices(g_drawSkin)
+            && g_drawModel && !UsesGlobalIndices(g_drawModel))
         {
             uint32_t submesh = 0, wideStart = 0;
             if (SubmeshIndexOf(*g_drawSection, *g_drawSkin, submesh)
@@ -692,8 +697,8 @@ namespace
                                 &hkSceneTriangleHitTest, &g_origTriangleHitTest))
             return false;
         WLOG_INFO("m2native-indices: submesh triangle starts read and drawn as "
-                  "(level << 16) | indexStart; a model past a 16-bit vertex address is filled and "
-                  "drawn one submesh window at a time");
+                  "(level << 16) | indexStart; dense wide-vertex refill registered; "
+                  "section vertex windows apply only to local indices");
         return true;
     }
 }

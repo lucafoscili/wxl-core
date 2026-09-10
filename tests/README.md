@@ -37,3 +37,12 @@ sample bounds, observation placement, and the existing draw/binding boundaries.
 They do not execute the C++ hooks, validate native offsets, establish the actual
 runtime index mode, or prove that rendering is correct. This is a bounded Beta
 experiment; native observation is still required before choosing a correction.
+
+The subsequent global-index gate preserves the native vertex-stream offset when
+indices already name model vertices, instead of adding the section start twice.
+Its source-contract check verifies that the gate owns the offset-write block;
+the logs remain active for bypassed draws. Retest the same 65,536-vertex candidate:
+section 1 should keep emitted indices `678,679,680` with `override=0` and unchanged
+incoming/imposed offsets. Visual recovery is a separate client verdict.
+This correction does not extend the range of uint16 global indices beyond vertex
+65,535 or validate the separate local/group-relative path.
