@@ -24,8 +24,8 @@
 // only when the widened start plus the submesh's own index count still lands inside the triangle
 // array the skin itself declares. A marker names an offset that array cannot contain, so it is
 // rejected and the client's own 16-bit reading stands. Two consequences worth stating: a skin that
-// is not writing an extended start is filled by the untouched engine function, and no value of
-// level can make the fill read outside the array it is reading from.
+// is not writing an extended start keeps the engine fill unless the explicit dense shared-vertex
+// conversion below applies, and no value of level can extend the folded source beyond its array.
 
 #include "common/Log.hpp"
 #include "engine/assets/shared/models/m2/M2Format.hpp"
@@ -36,6 +36,7 @@
 #include "game/M2.hpp"
 #include "offsets/engine/Gx.hpp"
 #include "offsets/game/M2.hpp"
+#include "client/CM2Shared/VertexWindow.hpp"
 
 #include <cstring>
 
@@ -43,6 +44,7 @@ namespace
 {
     namespace off   = wxl::offsets::game::m2;
     namespace gxoff = wxl::offsets::engine::gx;
+    namespace window = wxl::client::m2::window;
 
     using wxl::game::m2::M2SkinProfile;
     using wxl::structure::m2::M2Header;
@@ -166,7 +168,8 @@ namespace
 
     /**
      * @brief The client's own choice between copying the skin's indices as they stand and rebasing
-     *        each submesh onto its own vertex window. Both fills below must reproduce it exactly.
+     *        each submesh onto its own vertex window. The explicit single-copy shared conversion
+     *        changes only its uploaded indices and matching draw descriptor, never these flags.
      */
     bool UsesGlobalIndices(void* model)
     {
@@ -176,6 +179,88 @@ namespace
         const uint32_t flags = *At<uint32_t>(record, off::kOffM2FileFlags);
         if (flags & off::kM2FileFlagGlobalIndices) return true;
         return header->bones.count == 1 && (flags & off::kM2FileFlagSingleBoneGlobal) != 0;
+    }
+
+    // Shared with picking: a converted binding is recorded only after a completed refill.
+    struct WideSkinNote
+    {
+        const M2SkinProfile* skin;
+        const uint16_t* indices;
+        uint32_t indexCount;
+        uint32_t vertexCount;
+        void* model;
+        void* convertedSharedIb;
+    };
+    constexpr size_t kMaxWideSkins = 64;
+    WideSkinNote g_wideSkins[kMaxWideSkins] = {};
+    size_t g_wideSkinCount = 0;
+
+    WideSkinNote* NoteWideSkin(const M2SkinProfile* skin)
+    {
+        if (!skin || !skin->indices) return nullptr;
+        for (size_t i = 0; i < g_wideSkinCount; ++i)
+        {
+            WideSkinNote& n = g_wideSkins[i];
+            if (n.skin != skin) continue;
+            // Instance-index notes must not erase a still-valid shared conversion.
+            if (n.indices != skin->indices || n.indexCount != skin->indexCount
+                || n.vertexCount != skin->vertexCount)
+                n = { skin, skin->indices, skin->indexCount, skin->vertexCount, nullptr, nullptr };
+            return &n;
+        }
+        if (g_wideSkinCount == kMaxWideSkins) return nullptr;
+        WideSkinNote& n = g_wideSkins[g_wideSkinCount++];
+        n = { skin, skin->indices, skin->indexCount, skin->vertexCount, nullptr, nullptr };
+        return &n;
+    }
+
+    void ClearSharedConversion(void* model)
+    {
+        for (size_t i = 0; i < g_wideSkinCount; ++i)
+            if (g_wideSkins[i].model == model) g_wideSkins[i].convertedSharedIb = nullptr;
+    }
+
+    WideSkinNote* ConvertedBinding(void* buffer)
+    {
+        if (buffer)
+            for (size_t i = 0; i < g_wideSkinCount; ++i)
+                if (g_wideSkins[i].convertedSharedIb == buffer) return &g_wideSkins[i];
+        return nullptr;
+    }
+
+    // This is a fill-time check, not a per-draw scan of all triangle payloads.
+    bool CanWindowSharedIndices(void* model, const M2SkinProfile* skin)
+    {
+        if (!model || !skin || skin->vertexCount <= 0x10000u || !skin->submeshes
+            || !skin->indices || !skin->vertexLookup || !skin->bones || !UsesGlobalIndices(model)
+            || *At<uint32_t>(model, off::kOffSharedInstanceCopies) != 1
+            || !*reinterpret_cast<const uint32_t*>(off::kEnableShaders)) return false;
+        void* device = wxl::game::gx::RawGraphicsDevice();
+        auto* header = *At<M2Header*>(model, off::kOffModelHeader);
+        auto* copies = *At<M2SkinSection*>(model, off::kOffModelSubmeshBuf);
+        if (!device || *At<uint32_t>(device, gxoff::kGxDeviceBaseVertexMode)
+            || !header || !header->vertices.offset || header->vertices.count < skin->vertexCount
+            || !copies) return false;
+        uint32_t first = 0, written = 0;
+        for (uint32_t i = 0; i < skin->submeshCount; ++i)
+        {
+            const M2SkinSection& s = skin->submeshes[i];
+            const M2SkinSection& copy = copies[i];
+            const uint32_t start = TriangleStart(s, *skin);
+            // Keep the existing source/copy triangle matching valid on this single-copy path.
+            if (!window::Fits(first, s.vertexStart, s.vertexCount, skin->vertexCount)
+                || start != written || start > skin->indexCount || s.indexCount > skin->indexCount - start
+                || copy.indexCount != s.indexCount || copy.vertexCount != s.vertexCount
+                || copy.vertexStart != s.vertexStart || copy.indexStart != s.indexStart || copy.level != s.level)
+                return false;
+            for (uint32_t k = 0; k < s.indexCount; ++k)
+                if (window::LocalIndex(skin->indices[start + k], s.vertexStart) >= s.vertexCount) return false;
+            for (uint32_t k = 0; k < s.vertexCount; ++k)
+                if (skin->vertexLookup[first + k] != uint16_t(first + k)) return false;
+            first += s.vertexCount;
+            written += s.indexCount;
+        }
+        return first == skin->vertexCount && written == skin->indexCount;
     }
 
     uint32_t DiagnosticFileFlags(void* model)
@@ -188,11 +273,11 @@ namespace
                         const M2SkinProfile& skin, uint32_t section, uint32_t groupOrCopy,
                         int groupVertexBase, uint16_t refillVertexStart, bool globalIndices,
                         int16_t bias, uint32_t start, uint32_t count, size_t written,
-                        const uint16_t* emitted)
+                        const uint16_t* emitted, bool windowed = false)
     {
         uint32_t& used = shared ? g_sharedRefillLogs : g_instanceRefillLogs;
         const uint32_t limit = shared ? kSharedRefillLogLimit : kInstanceRefillLogLimit;
-        if (!NeedsWideVertices(&skin) || section > 1 || used >= limit) return;
+        if (!NeedsWideVertices(&skin) || (section > 1 && skin.submeshCount - section > 3) || used >= limit) return;
         ++used;
         const bool triangle = count >= 3 && start <= skin.indexCount
                               && count <= skin.indexCount - start;
@@ -200,14 +285,15 @@ namespace
         WLOG_INFO("m2wide-beta: refill=%s record=%u model=%p instance=%p skin=%p ib=%p "
                   "section=%u global=%u flags=0x%08X groupOrCopy=%u groupVertexBase=%d "
                   "sourceVertexStart=%u refillVertexStart=%u bias=%d sourceIndexStart=%u "
-                  "written=%zu count=%u triangle=%u raw=(%u,%u,%u) emitted=(%u,%u,%u)",
+                  "written=%zu count=%u triangle=%u raw=(%u,%u,%u) emitted=(%u,%u,%u) windowed=%u",
                   shared ? "shared" : "instance", used, model, instance, &skin, buffer,
                   section, unsigned(globalIndices), DiagnosticFileFlags(model), groupOrCopy,
                   groupVertexBase, unsigned(skin.submeshes[section].vertexStart),
                   unsigned(refillVertexStart), int(bias), start, written, count, unsigned(triangle),
                   raw ? unsigned(raw[0]) : 0u, raw ? unsigned(raw[1]) : 0u,
                   raw ? unsigned(raw[2]) : 0u, triangle ? unsigned(emitted[0]) : 0u,
-                  triangle ? unsigned(emitted[1]) : 0u, triangle ? unsigned(emitted[2]) : 0u);
+                  triangle ? unsigned(emitted[1]) : 0u, triangle ? unsigned(emitted[2]) : 0u,
+                  unsigned(windowed));
         wxl::log::Flush();
     }
 
@@ -309,7 +395,8 @@ namespace
      * @brief Refills the shared index buffer: every submesh in skin order, each repeated once per
      *        instance copy, at the offsets the engine wrote back into the submesh copies.
      */
-    void RefillSharedIndices(void* model, const M2SkinProfile& skin, bool globalIndices)
+    void RefillSharedIndices(void* model, const M2SkinProfile& skin, bool globalIndices,
+                             WideSkinNote* windowNote = nullptr)
     {
         void* device = wxl::game::gx::RawGraphicsDevice();
         void* buffer = *At<void*>(model, off::kOffSharedIndexBuf);
@@ -342,14 +429,31 @@ namespace
             int16_t bias = globalIndices ? int16_t(0) : static_cast<int16_t>(-static_cast<int16_t>(copy.vertexStart));
             for (uint32_t c = 0; c < instanceCopies; ++c)
             {
-                EmitBlock(dst, skin.indices, start, copy.indexCount, bias);
+                if (windowNote)
+                    for (uint32_t k = 0; k < copy.indexCount; ++k)
+                        dst[k] = window::LocalIndex(skin.indices[start + k], skin.submeshes[i].vertexStart);
+                else
+                    EmitBlock(dst, skin.indices, start, copy.indexCount, bias);
                 LogIndexRefill(true, model, nullptr, buffer, skin, i, c, 0, copy.vertexStart,
-                               globalIndices, bias, start, copy.indexCount, size_t(dst - base), dst);
+                               globalIndices, windowNote ? static_cast<int16_t>(-static_cast<int16_t>(skin.submeshes[i].vertexStart)) : bias,
+                               start, copy.indexCount, size_t(dst - base), dst, windowNote != nullptr);
                 dst += copy.indexCount;
                 bias = static_cast<int16_t>(bias + static_cast<int16_t>(globalIndices ? skin.vertexCount : copy.vertexCount));
             }
         }
         CommitIndexBuffer(device, buffer);
+        if (windowNote)
+        {
+            windowNote->model = model;
+            windowNote->convertedSharedIb = buffer;
+            if (g_sharedRefillLogs < kSharedRefillLogLimit)
+            {
+                ++g_sharedRefillLogs;
+                WLOG_INFO("m2wide-beta: converted=1 record=%u model=%p skin=%p ib=%p vertices=%u",
+                          g_sharedRefillLogs, model, &skin, buffer, skin.vertexCount);
+                wxl::log::Flush();
+            }
+        }
     }
 
     /**
@@ -423,22 +527,6 @@ namespace
         }
     }
 
-    // Wide skins are noted when their index buffers are filled so the picking hook below can
-    // recognise a triangle range that was computed from a truncated 16-bit start.
-    struct WideSkinNote { const M2SkinProfile* skin; const uint16_t* indices; uint32_t indexCount; };
-    constexpr size_t kMaxWideSkins = 64;
-    WideSkinNote g_wideSkins[kMaxWideSkins] = {};
-    size_t       g_wideSkinCount = 0;
-
-    void NoteWideSkin(const M2SkinProfile* skin)
-    {
-        if (!skin || !skin->indices) return;
-        for (size_t i = 0; i < g_wideSkinCount; ++i)
-            if (g_wideSkins[i].skin == skin) { g_wideSkins[i] = { skin, skin->indices, skin->indexCount }; return; }
-        if (g_wideSkinCount < kMaxWideSkins)
-            g_wideSkins[g_wideSkinCount++] = { skin, skin->indices, skin->indexCount };
-    }
-
     uint32_t __fastcall hkSetModelIndices(void* instance, void* edx)
     {
         void* model = instance ? *At<void*>(instance, off::kOffInstModel) : nullptr;
@@ -458,12 +546,15 @@ namespace
     {
         auto* skin = model ? *At<M2SkinProfile*>(model, off::kOffModelSkin) : nullptr;
         const bool rebuilding = model && !BufferHolds(*At<void*>(model, off::kOffSharedIndexBuf));
+        if (rebuilding) ClearSharedConversion(model);
 
         // The original owns creating the pool/buffer pair and sizing it, so it always runs first.
         const uint32_t result = g_origSharedSetIndices(model, edx);
-        if (!result || !rebuilding || !UsesWideStarts(skin)) return result;
-        NoteWideSkin(skin);
-        RefillSharedIndices(model, *skin, UsesGlobalIndices(model));
+        if (!result || !rebuilding) return result;
+        const bool windows = CanWindowSharedIndices(model, skin);
+        if (!UsesWideStarts(skin) && !windows) return result;
+        WideSkinNote* note = NoteWideSkin(skin);
+        RefillSharedIndices(model, *skin, UsesGlobalIndices(model), windows ? note : nullptr);
         return result;
     }
 
@@ -524,6 +615,8 @@ namespace
      */
     void __fastcall hkDeviceDraw(void* device, void* edx, uint32_t* batch, int indexed)
     {
+        WideSkinNote* converted = indexed
+            ? ConvertedBinding(*At<void*>(device, gxoff::kGxDeviceIndexBuffer)) : nullptr;
         const bool logDraw = indexed && batch && g_drawSection && NeedsWideVertices(g_drawSkin)
                              && g_drawLogs < kDrawLogLimit;
         void* diagnosticStream = logDraw ? *At<void*>(device, gxoff::kGxDeviceVertexStream) : nullptr;
@@ -546,7 +639,7 @@ namespace
         // stream's stored offset by its stride. So the offset is what gets set -- the device then
         // computes the base itself, with its own arithmetic, and nothing here reimplements a draw.
         //
-        // Global indices already name their model vertices. Adding a section base again fetches
+        // Unconverted global indices already name their model vertices. Adding a section base again fetches
         // another section (or past the buffer); preserve the native stream offset on that path.
         // This does not make uint16 global indices address vertices beyond 65535.
         //
@@ -554,7 +647,55 @@ namespace
         // after this, and a base meant for one submesh would silently displace all of them.
         uint32_t* streamOffset = nullptr;
         uint32_t  savedOffset  = 0;
-        if (indexed && g_drawSection && NeedsWideVertices(g_drawSkin)
+        uint16_t savedMin = 0, savedMax = 0;
+        bool windowedDraw = false;
+        if (converted)
+        {
+            uint32_t section = 0, wideStart = 0, imposed = 0;
+            void* stream = *At<void*>(device, gxoff::kGxDeviceVertexStream);
+            const uint32_t stride = stream ? *At<uint32_t>(stream, gxoff::kGxBufStreamStride) : 0;
+            bool supported = batch && g_drawModel && g_drawSkin && g_drawSection
+                && converted->model == g_drawModel && converted->skin == g_drawSkin
+                && converted->indices == g_drawSkin->indices && converted->indexCount == g_drawSkin->indexCount
+                && converted->vertexCount == g_drawSkin->vertexCount
+                && converted->convertedSharedIb == *At<void*>(g_drawModel, off::kOffSharedIndexBuf)
+                && *At<uint32_t>(g_drawModel, off::kOffSharedInstanceCopies) == 1
+                && UsesGlobalIndices(g_drawModel) && *reinterpret_cast<const uint32_t*>(off::kEnableShaders)
+                && stream && stream == *At<void*>(g_drawModel, off::kOffSharedVertexBuf)
+                && stride == off::kModelVertexStride && !*At<uint32_t>(device, gxoff::kGxDeviceBaseVertexMode)
+                && SubmeshIndexOf(*g_drawSection, *g_drawSkin, section)
+                && WideVertexStart(*g_drawSkin, section, wideStart);
+            if (supported)
+            {
+                const M2SkinSection& s = g_drawSkin->submeshes[section];
+                supported = window::Fits(wideStart, s.vertexStart, s.vertexCount, g_drawSkin->vertexCount)
+                    && g_drawSection->vertexCount == s.vertexCount
+                    && *At<uint32_t>(batch, gxoff::kGxBatchStartIndex) == TriangleStart(s, *g_drawSkin)
+                    && *At<uint32_t>(batch, gxoff::kGxBatchIndexCount) == s.indexCount
+                    && window::StreamOffset(*At<uint32_t>(stream, gxoff::kGxBufStreamOffset), wideStart, stride, imposed);
+            }
+            if (!supported)
+            {
+                // Once converted, falling through with a global descriptor is no longer safe.
+                static bool warnedConverted = false;
+                if (!warnedConverted)
+                {
+                    warnedConverted = true;
+                    WLOG_WARN("m2wide-beta: skipping unsupported draw of converted ib=%p model=%p skin=%p vb=%p stride=%u",
+                              converted->convertedSharedIb, g_drawModel, g_drawSkin, stream, stride);
+                }
+                return;
+            }
+            streamOffset = At<uint32_t>(stream, gxoff::kGxBufStreamOffset);
+            savedOffset = *streamOffset;
+            savedMin = *At<uint16_t>(batch, gxoff::kGxBatchMinIndex);
+            savedMax = *At<uint16_t>(batch, gxoff::kGxBatchMaxIndex);
+            *streamOffset = imposed;
+            *At<uint16_t>(batch, gxoff::kGxBatchMinIndex) = 0;
+            *At<uint16_t>(batch, gxoff::kGxBatchMaxIndex) = g_drawSkin->submeshes[section].vertexCount - 1;
+            windowedDraw = true;
+        }
+        else if (indexed && g_drawSection && NeedsWideVertices(g_drawSkin)
             && g_drawModel && !UsesGlobalIndices(g_drawModel))
         {
             uint32_t submesh = 0, wideStart = 0;
@@ -599,7 +740,7 @@ namespace
                       "sharedIb=%p instanceIb=%p vb=%p global=%u flags=0x%08X matched=%u section=%u "
                       "sourceVertexStart=%u copyVertexStart=%u wideValid=%u wideStart=%u stride=%u "
                       "mode=%u incomingOffset=%u imposedOffset=%u override=%u incomingStartIndex=%u "
-                      "startIndex=%u count=%u min=%u max=%u",
+                      "startIndex=%u count=%u min=%u max=%u converted=%u windowed=%u",
                       g_drawLogs, g_drawModel, g_drawInstance, g_drawSkin,
                       *At<void*>(device, gxoff::kGxDeviceIndexBuffer),
                       g_drawModel ? *At<void*>(g_drawModel, off::kOffSharedIndexBuf) : nullptr,
@@ -615,12 +756,18 @@ namespace
                       *At<uint32_t>(batch, gxoff::kGxBatchStartIndex),
                       *At<uint32_t>(batch, gxoff::kGxBatchIndexCount),
                       unsigned(*At<uint16_t>(batch, gxoff::kGxBatchMinIndex)),
-                      unsigned(*At<uint16_t>(batch, gxoff::kGxBatchMaxIndex)));
+                      unsigned(*At<uint16_t>(batch, gxoff::kGxBatchMaxIndex)),
+                      unsigned(converted != nullptr), unsigned(windowedDraw));
             wxl::log::Flush();
         }
 
         g_origDeviceDraw(device, edx, batch, indexed);
 
+        if (windowedDraw)
+        {
+            *At<uint16_t>(batch, gxoff::kGxBatchMinIndex) = savedMin;
+            *At<uint16_t>(batch, gxoff::kGxBatchMaxIndex) = savedMax;
+        }
         if (streamOffset) *streamOffset = savedOffset;
     }
 
@@ -698,7 +845,7 @@ namespace
             return false;
         WLOG_INFO("m2native-indices: submesh triangle starts read and drawn as "
                   "(level << 16) | indexStart; dense wide-vertex refill registered; "
-                  "section vertex windows apply only to local indices");
+                  "section vertex windows apply to local indices and validated single-copy shared conversions");
         return true;
     }
 }

@@ -1,4 +1,4 @@
-"""Source contracts for the temporary Beta logs, not native rendering tests."""
+"""Source contracts for Beta logs and shared windows, not native rendering tests."""
 import re
 import unittest
 
@@ -6,7 +6,8 @@ from test_wide_indices_buffer_binding import SOURCE
 
 
 def body(name):
-    match = re.search(r"\bvoid\s+(?:__fastcall\s+)?" + name + r"\([^)]*\)\s*\{", SOURCE)
+    match = re.search(r"\b(?:void|bool|uint32_t|WideSkinNote\s*\*)\s*(?:__fastcall\s+)?"
+                      + name + r"\([^)]*\)\s*\{", SOURCE)
     if not match:
         raise AssertionError(f"Missing function {name}")
     start, depth = match.end(), 1
@@ -23,7 +24,9 @@ class WideDiagnosticTests(unittest.TestCase):
                             ("VertexRefill", 8), ("Draw", 96)):
             self.assertIn(f"k{name}LogLimit = {limit};", SOURCE)
         refill = body("LogIndexRefill")
-        self.assertIn("!NeedsWideVertices(&skin) || section > 1 || used >= limit", refill)
+        self.assertIn("!NeedsWideVertices(&skin)", refill)
+        self.assertIn("section > 1 && skin.submeshCount - section > 3", refill)
+        self.assertIn("used >= limit", refill)
         self.assertIn("shared ? kSharedRefillLogLimit : kInstanceRefillLogLimit", refill)
         self.assertEqual(refill.count("++used;"), 1)
         self.assertIn("NeedsWideVertices(&skin) && g_vertexRefillLogs < kVertexRefillLogLimit",
@@ -88,6 +91,52 @@ class WideDiagnosticTests(unittest.TestCase):
         # Bypassed global draws still produce the diagnostic evidence.
         log_gate = draw[draw.index("const bool logDraw"):draw.index(";", draw.index("const bool logDraw"))]
         self.assertNotIn("UsesGlobalIndices", log_gate)
+
+    def test_window_fill_requires_true_overflow_and_valid_dense_source(self):
+        eligibility = body("CanWindowSharedIndices")
+        for check in ("skin->vertexCount <= 0x10000u", "!UsesGlobalIndices(model)",
+                      "off::kOffSharedInstanceCopies) != 1", "off::kEnableShaders",
+                      "window::Fits(first, s.vertexStart, s.vertexCount, skin->vertexCount)",
+                      "window::LocalIndex(skin->indices[start + k], s.vertexStart) >= s.vertexCount",
+                      "skin->vertexLookup[first + k] != uint16_t(first + k)",
+                      "first == skin->vertexCount && written == skin->indexCount"):
+            self.assertIn(check, eligibility)
+        hook = body("hkSharedSetIndices")
+        self.assertIn("if (!UsesWideStarts(skin) && !windows) return result;", hook)
+        self.assertIn("windows ? note : nullptr", hook)
+
+    def test_conversion_marker_is_cleared_before_rebuild_and_set_after_commit(self):
+        hook = body("hkSharedSetIndices")
+        self.assertLess(hook.index("if (rebuilding) ClearSharedConversion(model);"),
+                        hook.index("g_origSharedSetIndices(model, edx)"))
+        refill = body("RefillSharedIndices")
+        self.assertLess(refill.index("if (!dst) return;"), refill.index("if (windowNote)"))
+        self.assertLess(refill.index("CommitIndexBuffer(device, buffer);"),
+                        refill.index("windowNote->convertedSharedIb = buffer;"))
+        note = body("NoteWideSkin")
+        self.assertIn("if (g_wideSkinCount == kMaxWideSkins) return nullptr;", note)
+        # An unrelated instance note preserves a conversion unless skin identity changed.
+        self.assertIn("n.indices != skin->indices || n.indexCount != skin->indexCount", note)
+        self.assertIn("n.vertexCount != skin->vertexCount", note)
+        self.assertNotIn("ClearSharedConversion", body("hkSetModelIndices"))
+
+    def test_converted_draw_requires_recorded_binding_and_restores_descriptor(self):
+        draw = body("hkDeviceDraw")
+        self.assertIn("ConvertedBinding(*At<void*>(device, gxoff::kGxDeviceIndexBuffer))", draw)
+        for check in ("converted->model == g_drawModel && converted->skin == g_drawSkin",
+                      "converted->vertexCount == g_drawSkin->vertexCount",
+                      "converted->convertedSharedIb == *At<void*>(g_drawModel, off::kOffSharedIndexBuf)",
+                      "off::kOffSharedInstanceCopies) == 1", "off::kEnableShaders",
+                      "stream == *At<void*>(g_drawModel, off::kOffSharedVertexBuf)",
+                      "stride == off::kModelVertexStride", "window::StreamOffset(",
+                      "window::Fits(wideStart, s.vertexStart, s.vertexCount, g_drawSkin->vertexCount)"):
+            self.assertIn(check, draw)
+        self.assertRegex(draw, r"if \(!supported\)[\s\S]*?WLOG_WARN\([\s\S]*?return;")
+        call = draw.index("g_origDeviceDraw(device, edx, batch, indexed);")
+        for suffix, field in (("Min", "MinIndex"), ("Max", "MaxIndex")):
+            self.assertIn(f"saved{suffix} = *At<uint16_t>(batch, gxoff::kGxBatch{field});", draw[:call])
+            self.assertIn(f"*At<uint16_t>(batch, gxoff::kGxBatch{field}) = saved{suffix};", draw[call:])
+        self.assertIn("if (windowedDraw)", draw[call:])
 
 
 if __name__ == "__main__":

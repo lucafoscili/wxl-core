@@ -14,7 +14,8 @@ Build the Win32 DLL and retest the same model in the client for that verdict.
 The temporary `m2wide-beta` address experiment logs only skins with more than
 65,535 vertices. Process-lifetime caps are 16 shared-index refill records,
 16 instance-index refill records, 8 vertex-refill records, and 96 draw records.
-Index refill records focus on sections 0 and 1 and include the first complete
+Index refill records focus on sections 0 and 1 plus the last three sections
+(including the boundary markers) and include the first complete
 triangle only (`triangle=0` means the zero sample fields are unavailable).
 `groupOrCopy` is the group number for instance refills and copy number for shared
 refills; `groupVertexBase` applies only to instance refills. The latter reports
@@ -46,3 +47,45 @@ section 1 should keep emitted indices `678,679,680` with `override=0` and unchan
 incoming/imposed offsets. Visual recovery is a separate client verdict.
 This correction does not extend the range of uint16 global indices beyond vertex
 65,535 or validate the separate local/group-relative path.
+
+The subsequent shared-window candidate handles dense identity skins with more
+than 65,536 vertices on the global-index, exactly-one-copy, shader-enabled shared
+buffer path. Its fill checks the full dense vertex layout, low-16 starts, lookup
+identity, matching source/copy triangle ranges, and each modulo-local index before
+rewriting shared indices. The existing 65,536-vertex global path stays unchanged.
+No file flags, bone palettes, or per-instance index fills change.
+
+The existing 64-entry wide-skin registry records the model, skin/index identity,
+vertex count, and successfully converted shared IB. A shared rebuild clears its
+conversion marker before the native fill; failed custom locks or a full registry
+do not activate converted draws. Instance-index notes preserve an unchanged
+shared conversion. This bounded registry does not recycle entries in this Beta.
+
+A converted draw requires the matching shared IB, the model's actual shared VB,
+stride 48, base mode 0, one copy, and a valid section. It adds the section's full
+vertex start to the incoming byte offset and temporarily sets local min/max
+bounds. Both bounds and offset are restored afterward. An unsupported subsequent
+draw of a converted IB is warned once and skipped: a native global descriptor
+cannot correctly consume that already-local index payload.
+This includes draws outside the existing triangle-batch context, such as an
+unhandled pass or doodad draw; those paths are not supported by this candidate.
+
+`windowed=1` on refill records describes the emitted local triangle; the separate
+`converted=1` record is emitted after commit. Draw records report `converted` and
+`windowed` together with the actual offset and local bounds. For the 65,539 probe,
+the final marker's raw `(0,1,2)` must address vertices 65,536 through 65,538 with a
+section base of 65,536, while the earlier section-1 raw `(678,679,680)` becomes
+local `(0,1,2)` with base 678. Compare the matching IB records and inspect the
+rendered markers; source-contract checks alone cannot establish that result.
+
+The actual C++ window arithmetic checks are a separate explicit target:
+
+```powershell
+cmake --build build --config Release --target wxl-vertex-window-test
+./build/Release/wxl-vertex-window-test.exe
+```
+
+This candidate does not add multi-copy/doodad, per-instance/local-group,
+CPU-skinned, or extension-provided vertex-buffer support. CPU picking still has
+only the existing triangle-start correction; vertex-address widening there is
+not established. Native temporal and rear/side rendering remain separate checks.
