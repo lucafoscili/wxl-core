@@ -86,6 +86,8 @@ cmake --build build --config Release --target wxl-vertex-window-test
 ```
 
 This candidate does not add multi-copy/doodad, per-instance/local-group,
-CPU-skinned, or extension-provided vertex-buffer support. CPU picking still has
-only the existing triangle-start correction; vertex-address widening there is
+CPU-skinned, or extension-provided vertex-buffer support. CPU picking has the
+existing triangle-start correction and, since the crossing guard, skips a noted
+section whose vertices cross a 16-bit wrap instead of letting the stock test read
+out of bounds (`test_wide_indices_picking.py`); vertex-address widening there is
 not established. Native temporal and rear/side rendering remain separate checks.

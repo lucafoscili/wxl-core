@@ -12,6 +12,14 @@ namespace wxl::client::m2::window
         return static_cast<uint16_t>(raw - startLow);
     }
 
+    // True when a section's vertices pass a multiple of 65536, so its 16-bit indices wrap below its
+    // 16-bit start. LocalIndex stays correct (unsigned); the signed index - start that the client's
+    // picking test computes goes negative for those indices.
+    constexpr bool CrossesWrap(uint16_t firstLow, uint16_t count)
+    {
+        return static_cast<uint32_t>(firstLow) + count > 0x10000u;
+    }
+
     constexpr bool Fits(uint32_t first, uint16_t firstLow, uint16_t count, uint32_t total)
     {
         return count != 0 && static_cast<uint16_t>(first) == firstLow

@@ -774,8 +774,17 @@ namespace
     // ---- picking: the scene's ray-versus-geometry pass hands the triangle test a [begin, end) pair it
     // computed from the submesh's 16-bit start, so a widened submesh is tested 65536 indices too early
     // and the test walks off its scratch window (crash at 0x0081D569 on a 44k-triangle model, 2026-09-07).
-    // Every wide skin is noted when its index buffer is filled; a pair that lands inside a noted skin's
+    // A wide skin is noted when its index buffer is filled (not before, and not past the registry); a pair that lands inside a noted skin's
     // triangle array and matches a submesh's low-16 start and count is remapped to the widened start.
+    // The vertex side has no such repair. The test subtracts the section's 16-bit vertex start from
+    // each 16-bit index as a signed value, so in a section whose vertices pass a multiple of 65536 the
+    // wrapped indices fall below the start and the test reads before its scratch buffer (ERROR #132 at
+    // 0x0081D55C on the cursor's first hover over Kasumi's hair, 2026-09-23). Until the test is handed a
+    // rebased copy with vertex base 0, a matched section that crosses is skipped: currentHit returned
+    // unchanged, with *bestDepth untouched, is the stock result for a range that hits nothing
+    // (0x0081D66E), so a hit found earlier in the walk survives. The skipped section cannot be hovered
+    // meanwhile, and a section wholly above 65536 still picks against positions read through the 16-bit
+    // vertex lookup.
     off::M2_SceneTriangleHitTestFn g_origTriangleHitTest = nullptr;
 
     int __fastcall hkSceneTriangleHitTest(void* scratch, void* edx, uint16_t* indexBegin, uint16_t* indexEnd,
@@ -797,6 +806,25 @@ namespace
                 {
                     const M2SkinSection& sec = skin.submeshes[k];
                     if (sec.indexStart != low || sec.indexCount != count) continue;
+                    if (window::CrossesWrap(sec.vertexStart, sec.vertexCount))
+                    {
+                        // Said once. The wide start is walked only for this message, so the per-frame
+                        // cost of the guard stays the one comparison above.
+                        static bool warnedCrossing = false;
+                        if (!warnedCrossing)
+                        {
+                            warnedCrossing = true;
+                            uint32_t wideStart = 0;
+                            const bool wideValid = WideVertexStart(skin, k, wideStart);
+                            WLOG_WARN("m2native-indices: picking skips section %u of model=%p skin=%p "
+                                      "(vertexStart low=%u wide=%u wideValid=%u, vertexCount=%u) until the "
+                                      "hit test handles wide skins: its 16-bit indices wrap below its 16-bit "
+                                      "start; later skips are silent",
+                                      k, n.model, n.skin, unsigned(sec.vertexStart), wideStart,
+                                      unsigned(wideValid), unsigned(sec.vertexCount));
+                        }
+                        return currentHit;
+                    }
                     const uint32_t wide = TriangleStart(sec, skin);
                     if (wide != sec.indexStart)
                     {
@@ -845,7 +873,8 @@ namespace
             return false;
         WLOG_INFO("m2native-indices: submesh triangle starts read and drawn as "
                   "(level << 16) | indexStart; dense wide-vertex refill registered; "
-                  "section vertex windows apply to local indices and validated single-copy shared conversions");
+                  "section vertex windows apply to local indices and validated single-copy shared conversions; "
+                  "picking skips noted sections whose vertices cross a 16-bit wrap");
         return true;
     }
 }

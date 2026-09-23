@@ -13,6 +13,14 @@ static_assert(!window::Fits(65536, 1, 3, 65539));
 static_assert(!window::Fits(65536, 0, 4, 65539));
 static_assert(!window::Fits(65540, 4, 1, 65539));
 static_assert(!window::Fits(0, 0, 0, 65539));
+static_assert(window::CrossesWrap(65466, 1089));  // Kasumi section 59.
+static_assert(window::CrossesWrap(64610, 1572));  // Shadowheart V3 section 12.
+static_assert(!window::CrossesWrap(646, 2418));   // Shadowheart V3 section 13, wholly above 65536.
+static_assert(!window::CrossesWrap(65466, 70));   // Last vertex 65535: no wrap.
+static_assert(window::CrossesWrap(65466, 71));
+static_assert(!window::CrossesWrap(1, 65535));
+static_assert(window::CrossesWrap(2, 65535));
+static_assert(!window::CrossesWrap(0, 0));
 
 int main()
 {
@@ -27,6 +35,12 @@ int main()
     {
         const auto low = static_cast<uint16_t>(c.first);
         if (!window::Fits(c.first, low, c.count, c.total)) return 1;
+        // The client's picking test computes index - start as a signed value; it goes negative
+        // for some vertex of the section exactly when CrossesWrap says so.
+        bool negative = false;
+        for (uint32_t k = 0; k < c.count; ++k)
+            negative |= int(static_cast<uint16_t>(c.first + k)) - int(low) < 0;
+        if (negative != window::CrossesWrap(low, c.count)) return 9;
         for (uint32_t k = 0; k < c.count; ++k)
         {
             const auto raw = static_cast<uint16_t>(c.first + k);
