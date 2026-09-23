@@ -50,6 +50,56 @@ namespace wxl::client::m2::window
         return count % 3 == 0 && first <= total && count <= total - first;
     }
 
+    // The 16-bit placement fields of one skin section (M2SkinSection +0x02 to +0x0A, in order).
+    struct SectionPlacement
+    {
+        uint16_t level, vertexStart, vertexCount, indexStart, indexCount;
+    };
+
+    // A section's first triangle index. level is the high half only when the widened range still
+    // lies inside the skin's triangle array (total); otherwise it is an older LOD / sub-batch
+    // marker and the client's own 16-bit start stands. Phrased as a subtraction so a garbage level
+    // cannot wrap the bound it is being checked against.
+    constexpr uint32_t SectionTriangleStart(const SectionPlacement& s, uint32_t total)
+    {
+        const uint32_t wide = (static_cast<uint32_t>(s.level) << 16) | s.indexStart;
+        return wide <= total && s.indexCount <= total - wide ? wide : s.indexStart;
+    }
+
+    // The native geometry routine's own triangle call for one section (0x0081DCEB-0x0081DD19):
+    // begin = indices + u16 indexStart, end = begin + u16 indexCount, vertex base = u16
+    // vertexStart. Integer addresses, as in ArraySlot: an unrelated pointer simply fails to match.
+    constexpr bool StockTriangleCall(uintptr_t indices, const SectionPlacement& s, uintptr_t begin,
+                                     uintptr_t end, int vertexBase)
+    {
+        return vertexBase == static_cast<int>(s.vertexStart)
+               && begin >= indices && begin - indices == uintptr_t(s.indexStart) * sizeof(uint16_t)
+               && end >= begin && end - begin == uintptr_t(s.indexCount) * sizeof(uint16_t);
+    }
+
+    // A legacy frame belongs to a noted skin that no conversion certificate admits: every skin of
+    // 65,536 vertices or fewer with wide triangle starts, and any larger one whose admission fails.
+    // Only the exact stock call of the section its filler recorded changes. A crossing section keeps
+    // the stock no-hit result, because the client's signed index - start goes negative (e9c68f6,
+    // 0x0081D55C); any other goes to its widened triangle start with the incoming vertex base
+    // (66a64d5; the stock range starts 65536 * level indices early, 0x0081D569). The caller asks
+    // only for a pending, identified and current frame; everything else is forwarded unchanged.
+    enum class LegacyAction { Forward, Skip, Remap };
+    struct LegacyTriangle
+    {
+        LegacyAction action = LegacyAction::Forward;
+        uint32_t triangleStart = 0; // Remap only
+    };
+
+    constexpr LegacyTriangle PlanLegacyTriangle(uintptr_t indices, uint32_t total,
+                                                const SectionPlacement& s, uintptr_t begin,
+                                                uintptr_t end, int vertexBase)
+    {
+        if (!StockTriangleCall(indices, s, begin, end, vertexBase)) return { LegacyAction::Forward, 0 };
+        if (CrossesWrap(s.vertexStart, s.vertexCount)) return { LegacyAction::Skip, 0 };
+        return { LegacyAction::Remap, SectionTriangleStart(s, total) };
+    }
+
     // One stack block, not an allocation per section or a 128 KiB maximum-section stack frame.
     // A validated triangle count makes every chunk a complete, ordered set of triangles.
     constexpr uint32_t kPickingIndexChunk = 3072;

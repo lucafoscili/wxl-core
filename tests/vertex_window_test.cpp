@@ -58,6 +58,98 @@ static_assert(offset.x == 4 && offset.y == 9 && offset.depth == 2); // no second
 constexpr auto projected = window::ProjectPickingPosition(point, normal, identity, 0, tilted, 2);
 static_assert(projected.x == 1.5f && projected.y == 6.75f && projected.depth == 5);
 
+// Triangle-start fold: level is a high half only while the widened range fits the array.
+static_assert(window::SectionTriangleStart({ 1, 0, 3, 0, 3 }, 65539) == 65536);
+static_assert(window::SectionTriangleStart({ 1, 0, 3, 1, 3 }, 65539) == 1); // would pass the end
+static_assert(window::SectionTriangleStart({ 0xFFFF, 0, 3, 0xFFFF, 3 }, UINT32_MAX) == 0xFFFF);
+static_assert(window::SectionTriangleStart({ 0, 0, 3, 700, 3 }, 65539) == 700);
+
+// Legacy frames. VirnaAoA00.skin (sha256 28afd6b3e1cb..., display 100010): 27,731 vertices and
+// 133,929 indices, 44,643 triangles -- the model of the 2026-09-07 crash at 0x0081D569. The index
+// fills note it, but no conversion certificate admits a skin of at most 65,536 vertices, so it
+// picks through a legacy frame. Sections 2 and 3 write wide triangle starts (level 1).
+constexpr uint32_t kVirnaIndices = 133929;
+constexpr window::SectionPlacement kVirna[] = {
+    { 0, 0, 10451, 0, 57123 }, { 0, 10451, 1935, 57123, 8913 },
+    { 1, 12386, 13533, 500, 60000 }, { 1, 25919, 1812, 60500, 7893 },
+};
+// Kasumi (83,182 vertices, 400,926 indices) when its admission fails: section 59 crosses 65,536
+// (stored start 65,466, 1,089 vertices); section 60 lies wholly above (stored start 1,019).
+constexpr uint32_t kKasumiIndices = 400926;
+constexpr window::SectionPlacement kKasumi59 = { 4, 65466, 1089, 48242, 6144 };
+constexpr window::SectionPlacement kKasumi60 = { 4, 1019, 380, 54386, 1860 };
+
+// The folded starts tile Virna's triangle array end to end, so the remap targets each section's
+// own triangles, while the stock 16-bit range of sections 2 and 3 ends before their own triangles
+// begin: it reads earlier sections' triangles, whose vertices lie below the section's start (the
+// negative scratch slots).
+constexpr bool TilesVirna()
+{
+    uint32_t next = 0;
+    for (const auto& s : kVirna)
+    {
+        if (window::SectionTriangleStart(s, kVirnaIndices) != next) return false;
+        next += s.indexCount;
+    }
+    return next == kVirnaIndices;
+}
+static_assert(TilesVirna());
+static_assert(window::SectionTriangleStart(kVirna[2], kVirnaIndices) == 66036);
+static_assert(window::SectionTriangleStart(kVirna[3], kVirnaIndices) == 126036);
+static_assert(kVirna[2].indexStart + kVirna[2].indexCount <= 66036);
+static_assert(kVirna[3].indexStart + kVirna[3].indexCount <= 126036);
+static_assert(window::SectionTriangleStart(kKasumi59, kKasumiIndices) == 310386);
+static_assert(window::SectionTriangleStart(kKasumi60, kKasumiIndices) == 316530);
+
+// The stock call the native geometry routine makes for a section, at an arbitrary array address.
+constexpr uintptr_t kIndices = 0x10000000u;
+constexpr uintptr_t StockBegin(const window::SectionPlacement& s)
+{
+    return kIndices + uintptr_t(s.indexStart) * sizeof(uint16_t);
+}
+constexpr uintptr_t StockEnd(const window::SectionPlacement& s)
+{
+    return StockBegin(s) + uintptr_t(s.indexCount) * sizeof(uint16_t);
+}
+constexpr window::LegacyTriangle Plan(const window::SectionPlacement& s, uint32_t total,
+                                      uintptr_t begin, uintptr_t end, int vertexBase)
+{
+    return window::PlanLegacyTriangle(kIndices, total, s, begin, end, vertexBase);
+}
+constexpr window::LegacyTriangle StockPlan(const window::SectionPlacement& s, uint32_t total)
+{
+    return Plan(s, total, StockBegin(s), StockEnd(s), s.vertexStart);
+}
+constexpr bool Is(window::LegacyTriangle plan, window::LegacyAction action, uint32_t start = 0)
+{
+    return plan.action == action && plan.triangleStart == start;
+}
+using window::LegacyAction;
+static_assert(Is(window::LegacyTriangle{}, LegacyAction::Forward)); // an unarmed frame forwards
+// The exact stock call is remapped to the section's own triangles (66a64d5) ...
+static_assert(Is(StockPlan(kVirna[2], kVirnaIndices), LegacyAction::Remap, 66036));
+static_assert(Is(StockPlan(kVirna[3], kVirnaIndices), LegacyAction::Remap, 126036));
+static_assert(Is(StockPlan(kVirna[1], kVirnaIndices), LegacyAction::Remap, 57123)); // same range
+static_assert(Is(StockPlan(kKasumi60, kKasumiIndices), LegacyAction::Remap, 316530));
+// ... except a crossing section, which keeps the stock no-hit result (e9c68f6).
+static_assert(Is(StockPlan(kKasumi59, kKasumiIndices), LegacyAction::Skip));
+// Any call that is not the recorded section's exact stock call goes on unchanged.
+constexpr const window::SectionPlacement& kWide = kVirna[2];
+static_assert(Is(Plan(kWide, kVirnaIndices, StockBegin(kWide), StockEnd(kWide), 0),
+                 LegacyAction::Forward));
+static_assert(Is(Plan(kWide, kVirnaIndices, StockBegin(kWide), StockEnd(kWide), 12386 + 65536),
+                 LegacyAction::Forward));
+static_assert(Is(Plan(kWide, kVirnaIndices, kIndices + 66036 * 2, kIndices + 126036 * 2, 12386),
+                 LegacyAction::Forward)); // already at the widened start
+static_assert(Is(Plan(kWide, kVirnaIndices, StockBegin(kWide), StockEnd(kVirna[3]), 12386),
+                 LegacyAction::Forward)); // the same begin with another section's end
+static_assert(Is(Plan(kVirna[3], kVirnaIndices, StockBegin(kWide), StockEnd(kWide), 12386),
+                 LegacyAction::Forward)); // another section's call
+static_assert(Is(Plan(kVirna[0], kVirnaIndices, kIndices - 2, StockEnd(kVirna[0]) - 2, 0),
+                 LegacyAction::Forward)); // before the array
+static_assert(Is(Plan(kKasumi59, kKasumiIndices, StockBegin(kKasumi59), StockEnd(kKasumi59), 0),
+                 LegacyAction::Forward)); // a crossing section is skipped only for its own call
+
 int main()
 {
     struct Case { uint32_t first; uint16_t count; uint32_t total; };
@@ -89,14 +181,14 @@ int main()
             return 3;
     }
 
-    uint32_t offset = 123;
-    if (!window::StreamOffset(480, 65536, 48, offset) || offset != 3146208) return 4;
-    if (!window::StreamOffset(480, 678, 48, offset) || offset != 33024) return 5;
-    const uint32_t previous = offset;
-    if (window::StreamOffset(UINT32_MAX - 47, 1, 48, offset) || offset != previous)
+    uint32_t streamOffset = 123;
+    if (!window::StreamOffset(480, 65536, 48, streamOffset) || streamOffset != 3146208) return 4;
+    if (!window::StreamOffset(480, 678, 48, streamOffset) || streamOffset != 33024) return 5;
+    const uint32_t previous = streamOffset;
+    if (window::StreamOffset(UINT32_MAX - 47, 1, 48, streamOffset) || streamOffset != previous)
         return 6;
-    if (window::StreamOffset(0, 1, 0, offset) || offset != previous) return 7;
-    if (!window::StreamOffset(UINT32_MAX, 0, 48, offset) || offset != UINT32_MAX)
+    if (window::StreamOffset(0, 1, 0, streamOffset) || streamOffset != previous) return 7;
+    if (!window::StreamOffset(UINT32_MAX, 0, 48, streamOffset) || streamOffset != UINT32_MAX)
         return 8;
     uint32_t slot = 42;
     if (!window::ArraySlot(0x1030, 0x1000, 2, 48, slot) || slot != 1) return 10;
@@ -133,8 +225,47 @@ int main()
                                    static_cast<uint16_t>(low)) != local) return 17;
             ++rebases;
         }
+    // Every single-argument change to a legacy section's stock call, and every other section's
+    // call, leaves it unchanged; only its own exact call is skipped or remapped.
+    unsigned plans = 0;
+    const window::SectionPlacement fixtures[] = { kVirna[0], kVirna[1], kVirna[2], kVirna[3],
+                                                  kKasumi59, kKasumi60 };
+    const uint32_t totals[] = { kVirnaIndices, kVirnaIndices, kVirnaIndices, kVirnaIndices,
+                                kKasumiIndices, kKasumiIndices };
+    for (size_t i = 0; i < 6; ++i)
+    {
+        const window::SectionPlacement& s = fixtures[i];
+        const uint32_t total = totals[i];
+        const uintptr_t begin = StockBegin(s), end = StockEnd(s);
+        const int base = s.vertexStart;
+        const bool crossing = window::CrossesWrap(s.vertexStart, s.vertexCount);
+        const window::LegacyTriangle exact = Plan(s, total, begin, end, base);
+        if (crossing ? !Is(exact, LegacyAction::Skip)
+                     : !Is(exact, LegacyAction::Remap, window::SectionTriangleStart(s, total)))
+            return 18;
+        const window::LegacyTriangle changed[] = {
+            Plan(s, total, begin + 2, end + 2, base), Plan(s, total, begin + 1, end + 1, base),
+            Plan(s, total, begin, end + 2, base), Plan(s, total, begin, end - 2, base),
+            Plan(s, total, begin, begin, base), Plan(s, total, end, begin, base),
+            Plan(s, total, begin, end, base + 1), Plan(s, total, begin, end, base - 1),
+            Plan(s, total, begin, end, base + 65536), Plan(s, total, begin, end, base - 65536),
+        };
+        for (const window::LegacyTriangle& plan : changed)
+        {
+            if (!Is(plan, LegacyAction::Forward)) return 19;
+            ++plans;
+        }
+        for (size_t j = 0; j < 6; ++j)
+        {
+            if (j == i || totals[j] != total) continue;
+            if (!Is(Plan(s, total, StockBegin(fixtures[j]), StockEnd(fixtures[j]),
+                         fixtures[j].vertexStart), LegacyAction::Forward)) return 20;
+            ++plans;
+        }
+    }
     std::printf("Vertex window arithmetic passed: %u vertex identities, boundary and offset cases; "
-                "%u picking partitions, %u additional rebases, address/bone/projection cases.\n",
-                checked, partitions, rebases);
+                "%u picking partitions, %u additional rebases, %u legacy-frame call plans, "
+                "address/bone/projection cases.\n",
+                checked, partitions, rebases, plans);
     return 0;
 }

@@ -26,6 +26,10 @@
 // rejected and the client's own 16-bit reading stands. Two consequences worth stating: a skin that
 // is not writing an extended start keeps the engine fill unless the explicit dense shared-vertex
 // conversion below applies, and no value of level can extend the folded source beyond its array.
+//
+// Picking follows the same split (see the picking section below): a skin with a current dense
+// shared-window conversion gets repaired positions and bounded local triangle chunks; any other noted
+// skin keeps the triangle-start remap (66a64d5) and the crossing-section skip (e9c68f6).
 
 #include "common/Log.hpp"
 #include "engine/assets/shared/models/m2/M2Format.hpp"
@@ -78,6 +82,12 @@ namespace
         return reinterpret_cast<T*>(static_cast<uint8_t*>(base) + offset);
     }
 
+    /** @brief The section's 16-bit placement fields, for the shared window arithmetic. */
+    window::SectionPlacement Placement(const M2SkinSection& s)
+    {
+        return { s.level, s.vertexStart, s.vertexCount, s.indexStart, s.indexCount };
+    }
+
     /**
      * @brief The submesh's first index into the skin's triangle array.
      * @param section  the submesh being placed.
@@ -86,10 +96,7 @@ namespace
      */
     uint32_t TriangleStart(const M2SkinSection& section, const M2SkinProfile& skin)
     {
-        const uint32_t wide = (static_cast<uint32_t>(section.level) << 16) | section.indexStart;
-        // Phrased as a subtraction so a garbage level cannot wrap the bound it is being checked against.
-        if (wide <= skin.indexCount && section.indexCount <= skin.indexCount - wide) return wide;
-        return section.indexStart;
+        return window::SectionTriangleStart(Placement(section), skin.indexCount);
     }
 
     /** @brief True when at least one submesh of this skin needs the fold; nothing else is touched. */
@@ -205,7 +212,7 @@ namespace
         PickingSource pickingSource = {};
         PickingCall* pickingCall = nullptr; // borrowed stack frame, scoped to kHitTestGeometry
         uint64_t pickingGeneration = 0;     // invalidates in-flight calls across a rebuild
-        uint32_t pickingLogged = 0;         // low / crossing / wholly-above sample bits
+        uint32_t pickingLogged = 0;         // low / crossing / above, legacy-wide, reject-reason bits
     };
     constexpr size_t kMaxWideSkins = 64;
     // Keep the added hook-chain slots and log budget in the existing registry too. No second
@@ -819,8 +826,35 @@ namespace
     // distinguish aliases. The fillers still run through their chains with the original arguments.
     // Only their wrapped CPU positions are replaced, from the dense source and current bone palette.
     // The triangle chain receives bounded local-index chunks and vertex base zero, in file order.
+    //
+    // A noted skin that no current certificate admits -- every skin of 65,536 vertices or fewer that
+    // writes wide triangle starts, and any larger skin whose admission fails -- gets a legacy frame
+    // instead, matched through the live instance's skin; the note's addresses are only comparison
+    // keys. Its filler call records the exact section and its triangle call keeps the two older
+    // repairs for that section's exact stock arguments: the triangle-start remap from 66a64d5 (the
+    // stock test otherwise walks 65536 * level indices too early and reads before its scratch
+    // window, 0x0081D569 on a 44k-triangle model, 2026-09-07) and the crossing-section skip from
+    // e9c68f6 (the signed index - vertexStart goes negative, ERROR #132 at 0x0081D55C, 2026-09-23).
+    // A legacy frame never repairs positions or chunks indices, so a wholly-above section of an
+    // uncertified skin still picks against positions read through the 16-bit lookup. Unnoted skins,
+    // and collision calls outside every geometry scope, reach the next triangle link unchanged.
     off::M2_SceneTriangleHitTestFn g_origTriangleHitTest = nullptr;
     constexpr uint32_t kPickingLogLimit = 24;
+    constexpr uint32_t kLegacyWideLogBit = 8; // after the low / crossing / wholly-above bits
+
+    // Why an admitted call was not tested with repaired data. Each reason is one sampled log bit
+    // per note (0x8 << reason), so a repeated rejection stays visible after the one-time warning.
+    enum class PickingReject : uint32_t
+    {
+        Call = 1,  // stale certificate, or a different mode, projection or distance at the fill
+        Section,   // section pointer outside the certified array
+        Shape,     // filler pairing, dense placement or vertex bounds
+        Triangles, // triangle range
+        Positions, // scratch capacity, bone palette or bone references
+        Arguments, // no pending fill, a changed certificate, or not the filled section's arguments
+        Window,    // a stored index outside its section window
+        Changed,   // the certificate or the prepared section changed between chunks
+    };
 
     struct PickingCall
     {
@@ -838,8 +872,12 @@ namespace
         float* bestDepth;
         M2SkinSection section = {};
         uint32_t sectionIndex = 0, first = 0, triangleStart = 0;
+        uint32_t prepareEpoch = 0; // advanced by every admitted preparation; chunking stops on change
         unsigned filler = 0;
+        PickingReject reject = PickingReject::Arguments;
         bool pending = false, ready = false;
+        bool identified = false; // section is this frame's own array entry, snapshotted above
+        bool legacy = false;     // noted but not admitted: remap and skip only, never repair
     };
 
     // A registry address is only a comparison key. In particular, never dereference n.skin to
@@ -874,6 +912,38 @@ namespace
         return nullptr;
     }
 
+    // The skin the native caller walks right now, read through the instance it owns.
+    const M2SkinProfile* LivePickingSkin(void* instance)
+    {
+        void* model = instance ? *At<void*>(instance, off::kOffInstModel) : nullptr;
+        return model ? *At<M2SkinProfile*>(model, off::kOffModelSkin) : nullptr;
+    }
+
+    // Address and size keys only: n.skin is compared with the live skin, never followed.
+    bool LegacyNoteMatches(const WideSkinNote& n, const M2SkinProfile* liveSkin)
+    {
+        return liveSkin && n.skin == liveSkin && n.indices == liveSkin->indices
+               && n.indexCount == liveSkin->indexCount && n.vertexCount == liveSkin->vertexCount;
+    }
+
+    // The note for a call no current certificate admits, found through the live skin alone. It
+    // needs no conversion, model or source record: index-only notes are the common case.
+    WideSkinNote* LegacyPickingNote(void* instance, const M2SkinProfile*& liveSkin)
+    {
+        liveSkin = LivePickingSkin(instance);
+        if (!liveSkin || !liveSkin->indices || !liveSkin->submeshes) return nullptr;
+        for (size_t i = 0; i < g_wideSkinCount; ++i)
+            if (LegacyNoteMatches(g_wideSkins[i], liveSkin)) return &g_wideSkins[i];
+        return nullptr;
+    }
+
+    // A legacy frame stays usable while its instance still walks the same noted skin.
+    bool CurrentLegacyCall(const PickingCall& call)
+    {
+        const M2SkinProfile* live = LivePickingSkin(call.instance);
+        return live == call.skin && LegacyNoteMatches(*call.note, live);
+    }
+
     bool CurrentPickingCall(const PickingCall& call)
     {
         // Check the snapshot too: a nested rebuild may publish a different valid certificate in
@@ -887,28 +957,69 @@ namespace
                && call.source.lookup == live.lookup;
     }
 
-    void WarnPicking(const PickingCall& call)
+    void WarnPicking(const PickingCall& call, PickingReject reason)
     {
         static bool warned = false;
         if (!warned)
         {
             warned = true;
             WLOG_WARN("m2native-indices: picking rejects an unsupported validated-wide call "
-                      "(scene=%p instance=%p skin=%p); no hit or depth is invented; "
+                      "(scene=%p instance=%p skin=%p reason=%u); no hit or depth is invented; "
                       "check source identity, section/filler pairing, bounds and bone palette; "
-                      "later rejects are silent", call.scene, call.instance, call.skin);
+                      "later rejects are only sampled as m2wide-beta picking-reject records",
+                      call.scene, call.instance, call.skin, static_cast<unsigned>(reason));
         }
+    }
+
+    // One sampled record per note and reason under the shared picking cap. remapped=1: a low
+    // section was forwarded through the triangle-start remap; remapped=0: nothing further was tested.
+    void LogPickingReject(PickingCall& call, PickingReject reason, bool remapped)
+    {
+        const uint32_t bit = 0x8u << static_cast<uint32_t>(reason);
+        if ((call.note->pickingLogged & bit) || g_wideSkins.pickingLogs >= kPickingLogLimit) return;
+        call.note->pickingLogged |= bit;
+        ++g_wideSkins.pickingLogs;
+        WLOG_INFO("m2wide-beta: picking-reject record=%u instance=%p skin=%p reason=%u identified=%u "
+                  "section=%u vertexStartLow=%u vertices=%u indices=%u remapped=%u",
+                  g_wideSkins.pickingLogs, call.instance, call.skin, static_cast<unsigned>(reason),
+                  unsigned(call.identified), call.sectionIndex, unsigned(call.section.vertexStart),
+                  unsigned(call.section.vertexCount), unsigned(call.section.indexCount),
+                  unsigned(remapped));
+        wxl::log::Flush();
+    }
+
+    void RejectPicking(PickingCall& call, PickingReject reason, bool remapped)
+    {
+        WarnPicking(call, reason);
+        LogPickingReject(call, reason, remapped);
+    }
+
+    // Said once per note, so an admission failure of a skin above 65,536 vertices shows in the log
+    // rather than only as a skipped section or wrong-place hover.
+    void LogLegacyWide(WideSkinNote& note, void* instance, const M2SkinProfile& skin)
+    {
+        if ((note.pickingLogged & kLegacyWideLogBit) || g_wideSkins.pickingLogs >= kPickingLogLimit)
+            return;
+        note.pickingLogged |= kLegacyWideLogBit;
+        ++g_wideSkins.pickingLogs;
+        WLOG_INFO("m2wide-beta: picking-legacy record=%u instance=%p skin=%p vertices=%u "
+                  "certificate=%u; no current shared-window certificate admits this wide skin, "
+                  "so its triangle starts are remapped and crossing sections skipped",
+                  g_wideSkins.pickingLogs, instance, &skin, skin.vertexCount,
+                  unsigned(note.convertedSharedIb != nullptr));
+        wxl::log::Flush();
     }
 
     // Keep the stack context off the unnoted path. The owner restores its predecessor on every
     // ordinary C++ return, including nested calls; it is not a lifetime pin or a thread lock.
-    __declspec(noinline) int RunPickingGeometry(WideSkinNote& note, void* scene, void* edx,
-                                               void* instance, int mode, float* projection,
-                                               float distance, float* point, int candidate,
-                                               float* bestDepth, int currentHit)
+    __declspec(noinline) int RunPickingGeometry(WideSkinNote& note, bool legacy, void* scene,
+                                               void* edx, void* instance, int mode,
+                                               float* projection, float distance, float* point,
+                                               int candidate, float* bestDepth, int currentHit)
     {
         PickingCall call = { &note, scene, instance, note.skin, note.pickingSource, note.pickingGeneration,
                              mode, projection, distance, point, candidate, bestDepth };
+        call.legacy = legacy;
         struct Scope
         {
             WideSkinNote& note;
@@ -925,10 +1036,14 @@ namespace
                                      int candidate, float* bestDepth, int currentHit)
     {
         WideSkinNote* note = PickingNote(instance);
+        const bool legacy = !note;
+        const M2SkinProfile* liveSkin = nullptr;
+        if (legacy) note = LegacyPickingNote(instance, liveSkin);
         if (!note)
             return g_wideSkins.geometryNext(scene, edx, instance, mode, projection, distance,
                                             point, candidate, bestDepth, currentHit);
-        return RunPickingGeometry(*note, scene, edx, instance, mode, projection, distance,
+        if (legacy && liveSkin->vertexCount > 0x10000u) LogLegacyWide(*note, instance, *liveSkin);
+        return RunPickingGeometry(*note, legacy, scene, edx, instance, mode, projection, distance,
                                    point, candidate, bestDepth, currentHit);
     }
 
@@ -995,24 +1110,50 @@ namespace
     {
         call.pending = true;
         call.ready = false;
+        call.identified = false;
+        ++call.prepareEpoch;
+        call.reject = PickingReject::Call;
         if (!CurrentPickingCall(call) || mode != call.mode || projection != call.projection
             || std::memcmp(&distance, &call.distance, sizeof distance) != 0 || !projection)
             return;
         uint32_t index = 0;
+        call.reject = PickingReject::Section;
         if (!window::ArraySlot(reinterpret_cast<uintptr_t>(section),
                                 reinterpret_cast<uintptr_t>(call.source.sections),
                                 call.source.sectionCount, sizeof(M2SkinSection), index)) return;
         call.sectionIndex = index;
         call.section = call.source.sections[index];
         call.filler = filler;
+        call.identified = true;
+        call.reject = PickingReject::Shape;
         const M2SkinSection& sec = call.section;
         if ((filler == 2) != (sec.boneInfluences == 1)
             || !WideVertexStart(*call.skin, index, call.first)
             || !window::Fits(call.first, sec.vertexStart, sec.vertexCount, call.skin->vertexCount)
             || !window::Fits(call.first, sec.vertexStart, sec.vertexCount, call.source.vertexCount)) return;
         call.triangleStart = TriangleStart(sec, *call.skin);
+        call.reject = PickingReject::Triangles;
         if (!window::TriangleRange(call.triangleStart, sec.indexCount, call.skin->indexCount)) return;
+        call.reject = PickingReject::Positions;
         call.ready = RefillPickingPositions(call);
+    }
+
+    // Record the exact section from the frame's own skin, followed only once CurrentLegacyCall
+    // shows it is the skin the instance walks. The recorded section and the index array the
+    // triangle call plans against are then one skin by construction, whatever skin argument the
+    // filler was given. Nothing is filled, projected or chunked here.
+    void PrepareLegacySection(PickingCall& call, void* section)
+    {
+        call.pending = true;
+        call.identified = false;
+        uint32_t index = 0;
+        if (!CurrentLegacyCall(call)
+            || !window::ArraySlot(reinterpret_cast<uintptr_t>(section),
+                                  reinterpret_cast<uintptr_t>(call.skin->submeshes),
+                                  call.skin->submeshCount, sizeof(M2SkinSection), index)) return;
+        call.sectionIndex = index;
+        call.section = call.skin->submeshes[index];
+        call.identified = true;
     }
 
     template <unsigned Filler>
@@ -1026,7 +1167,11 @@ namespace
         // same arguments and the native code keeps owning its original fill. For upper sections
         // the extra dense fill below overwrites those incorrect positions, not their allocation.
         g_wideSkins.fillNext[Filler](scene, edx, instance, skin, section, mode, projection, distance);
-        if (call) PreparePickingSection(*call, section, Filler, mode, projection, distance);
+        if (!call) return;
+        if (call->legacy)
+            PrepareLegacySection(*call, section);
+        else
+            PreparePickingSection(*call, section, Filler, mode, projection, distance);
     }
 
     PickingCall* PickingTriangleCall(void* scene, float* point, int mode, int candidate, float* bestDepth)
@@ -1067,23 +1212,29 @@ namespace
     __declspec(noinline) int TestPickingSection(PickingCall& call, void* edx, float* point, int mode,
                                                int candidate, float* bestDepth, int currentHit)
     {
-        const M2SkinSection& sec = call.section;
-        const uint16_t* source = call.skin->indices + call.triangleStart;
+        // Snapshots, not references into the frame: a re-preparation of this frame during a chunk
+        // rewrites its section, first and triangle start, and must not retarget later chunks.
+        const M2SkinSection sec = call.section;
+        const uint32_t triangleStart = call.triangleStart;
+        const M2SkinProfile* const skin = call.skin;
+        const uint32_t epoch = call.prepareEpoch;
+        const uint16_t* source = skin->indices + triangleStart;
         for (uint32_t k = 0; k < sec.indexCount; ++k)
             if (window::LocalIndex(source[k], sec.vertexStart) >= sec.vertexCount)
             {
-                WarnPicking(call);
+                RejectPicking(call, PickingReject::Window, false);
                 return currentHit;
             }
         uint16_t local[window::kPickingIndexChunk];
         uint32_t chunks = 0;
         for (uint32_t done = 0; done < sec.indexCount; )
         {
-            // A downstream hook may have triggered an observed rebuild during the last chunk.
-            // Keep any genuine result already returned, but do not read the retired payload again.
-            if (!CurrentPickingCall(call))
+            // A downstream hook may have triggered an observed rebuild or re-prepared this frame
+            // during the last chunk. Keep any genuine result already returned (the native prefix),
+            // but do not read the retired payload or submit a retargeted chunk.
+            if (!CurrentPickingCall(call) || call.prepareEpoch != epoch)
             {
-                WarnPicking(call);
+                RejectPicking(call, PickingReject::Changed, false);
                 return currentHit;
             }
             const uint32_t count = window::PickingChunk(sec.indexCount - done);
@@ -1096,8 +1247,85 @@ namespace
             done += count;
             ++chunks;
         }
-        if (chunks && CurrentPickingCall(call)) LogPicking(call, chunks);
+        if (chunks && CurrentPickingCall(call) && call.prepareEpoch == epoch) LogPicking(call, chunks);
         return currentHit;
+    }
+
+    // An admitted call that cannot use repaired data. A low section needs no position repair, so
+    // it is forwarded through the triangle-start remap with its own incoming vertex base, as the
+    // legacy path does. A crossing or wholly-above section (or one whose placement is unknown) has
+    // no safe stock form, so the native no-hit result is kept: currentHit, depth untouched.
+    int RejectPickingSection(PickingCall& call, bool pending, bool matched, void* scratch, void* edx,
+                             int vertexBase, float* point, int mode, int candidate,
+                             float* bestDepth, int currentHit)
+    {
+        const PickingReject reason = !pending ? PickingReject::Arguments
+                                     : (!call.identified || matched) ? call.reject
+                                     : PickingReject::Arguments;
+        const M2SkinSection& sec = call.section;
+        uint32_t first = 0;
+        // matched includes a current certificate, so the frame's skin is the live one here.
+        if (matched && WideVertexStart(*call.skin, call.sectionIndex, first)
+            && !window::NeedsPickingPositions(first, sec.vertexCount)
+            && !window::CrossesWrap(sec.vertexStart, sec.vertexCount))
+        {
+            RejectPicking(call, reason, true);
+            uint16_t* begin = call.skin->indices + TriangleStart(sec, *call.skin);
+            return g_origTriangleHitTest(scratch, edx, begin, begin + sec.indexCount, vertexBase,
+                                         point, mode, candidate, bestDepth, currentHit);
+        }
+        RejectPicking(call, reason, false);
+        return currentHit;
+    }
+
+    void WarnLegacySkip(const PickingCall& call)
+    {
+        // Said once. The wide start is walked only for this message, so the per-frame cost of
+        // the guard stays the comparisons in LegacyPickingTriangle.
+        static bool warnedCrossing = false;
+        if (warnedCrossing) return;
+        warnedCrossing = true;
+        uint32_t wideStart = 0;
+        const bool wideValid = WideVertexStart(*call.skin, call.sectionIndex, wideStart);
+        WLOG_WARN("m2native-indices: picking skips section %u of model=%p skin=%p "
+                  "(vertexStart low=%u wide=%u wideValid=%u, vertexCount=%u) until the "
+                  "hit test handles wide skins: its 16-bit indices wrap below its 16-bit "
+                  "start; later skips are silent",
+                  call.sectionIndex, *At<void*>(call.instance, off::kOffInstModel), call.skin,
+                  unsigned(call.section.vertexStart), wideStart, unsigned(wideValid),
+                  unsigned(call.section.vertexCount));
+    }
+
+    // The legacy frame's triangle call: only the exact stock arguments of the section its filler
+    // recorded are changed (window::PlanLegacyTriangle). A crossing section returns currentHit with
+    // depth untouched, the stock no-hit result (e9c68f6); any other is remapped to its widened
+    // triangle start with the incoming vertex base (66a64d5). Everything else reaches the next
+    // link as it came.
+    int LegacyPickingTriangle(PickingCall& call, bool pending, void* scratch, void* edx,
+                              uint16_t* indexBegin, uint16_t* indexEnd, int vertexBase,
+                              float* point, int mode, int candidate, float* bestDepth,
+                              int currentHit)
+    {
+        const M2SkinSection& sec = call.section;
+        const M2SkinProfile* skin = call.skin;
+        window::LegacyTriangle plan;
+        // The frame's skin is followed only once it is shown to be the one the instance walks.
+        if (pending && call.identified && CurrentLegacyCall(call))
+            plan = window::PlanLegacyTriangle(reinterpret_cast<uintptr_t>(skin->indices), skin->indexCount,
+                                              Placement(sec), reinterpret_cast<uintptr_t>(indexBegin),
+                                              reinterpret_cast<uintptr_t>(indexEnd), vertexBase);
+        if (plan.action == window::LegacyAction::Skip)
+        {
+            WarnLegacySkip(call);
+            return currentHit;
+        }
+        if (plan.action == window::LegacyAction::Remap)
+        {
+            indexBegin = skin->indices + plan.triangleStart;
+            indexEnd = indexBegin + sec.indexCount;
+        }
+        return g_origTriangleHitTest(scratch, edx, indexBegin, indexEnd, vertexBase,
+                                     point, mode, candidate, bestDepth, currentHit);
     }
 
     int __fastcall hkSceneTriangleHitTest(void* scratch, void* edx, uint16_t* indexBegin, uint16_t* indexEnd,
@@ -1105,24 +1333,30 @@ namespace
                                           float* bestDepth, int currentHit)
     {
         PickingCall* call = PickingTriangleCall(scratch, point, mode, candidate, bestDepth);
+        // Unnoted skins, and collision's call outside every geometry scope, go on as they came.
         if (!call)
             return g_origTriangleHitTest(scratch, edx, indexBegin, indexEnd, vertexBase,
                                          point, mode, candidate, bestDepth, currentHit);
         const bool pending = call->pending;
         call->pending = false; // a fill belongs to one triangle call, not a later batch or collision
-        if (!pending || !call->ready || !CurrentPickingCall(*call)
-            || vertexBase != int(call->section.vertexStart)
-            || indexBegin != call->skin->indices + call->section.indexStart
-            || indexEnd != indexBegin + call->section.indexCount)
-        {
-            WarnPicking(*call);
-            return currentHit;
-        }
-        // Empty sections already have the native no-hit meaning; preserve their chain call too.
-        if (!call->section.indexCount)
+        if (call->legacy)
+            return LegacyPickingTriangle(*call, pending, scratch, edx, indexBegin, indexEnd,
+                                         vertexBase, point, mode, candidate, bestDepth, currentHit);
+        const M2SkinSection& sec = call->section;
+        // The certificate is checked before the skin is followed to compare the stock arguments.
+        const bool matched = pending && call->identified && CurrentPickingCall(*call)
+                             && window::StockTriangleCall(reinterpret_cast<uintptr_t>(call->skin->indices),
+                                                          Placement(sec), reinterpret_cast<uintptr_t>(indexBegin),
+                                                          reinterpret_cast<uintptr_t>(indexEnd), vertexBase);
+        // Empty sections already have the native no-hit meaning; preserve their chain call too,
+        // without a warning and without spending the one-time warning.
+        if (matched && (!sec.indexCount || !sec.vertexCount))
             return g_origTriangleHitTest(scratch, edx, indexBegin, indexEnd, vertexBase,
                                          point, mode, candidate, bestDepth, currentHit);
-        return TestPickingSection(*call, edx, point, mode, candidate, bestDepth, currentHit);
+        if (matched && call->ready)
+            return TestPickingSection(*call, edx, point, mode, candidate, bestDepth, currentHit);
+        return RejectPickingSection(*call, pending, matched, scratch, edx, vertexBase, point, mode,
+                                    candidate, bestDepth, currentHit);
     }
 
     uint32_t __fastcall hkSharedSetVertices(void* model, void* edx, int texCoordSet)
@@ -1172,7 +1406,8 @@ namespace
         WLOG_INFO("m2native-indices: submesh triangle starts read and drawn as "
                   "(level << 16) | indexStart; dense wide-vertex refill registered; "
                   "section vertex windows apply to local indices and validated single-copy shared conversions; "
-                  "picking repairs validated wide positions and uses bounded local triangle chunks");
+                  "picking repairs validated wide positions and uses bounded local triangle chunks; "
+                  "unadmitted noted skins keep the triangle-start remap and skip crossing sections");
         return true;
     }
 }

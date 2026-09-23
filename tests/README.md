@@ -87,9 +87,23 @@ cmake --build build --config Release --target wxl-vertex-window-test
 
 This candidate does not add multi-copy/doodad, per-instance/local-group,
 CPU-skinned rendering, or extension-provided vertex-buffer support. The picking
-bridge now targets only a current, validated shared-window conversion, not every
-skin with a large index array. Unnoted skins, index-only notes and invalidated
-certificates forward the original arguments; they are not a general crash guard.
+repair targets only a current, validated shared-window conversion, not every
+skin with a large index array. A noted skin that no current certificate admits
+(every skin of at most 65,536 vertices with wide triangle starts, such as the
+index-only Virna, Lisa and BG3 skins, and any larger skin whose admission fails)
+gets a legacy frame instead. It is matched through the live instance's skin
+against the note's address and size keys; the note's skin pointer is never
+followed. Its filler call records the exact section from the frame's own skin,
+read only once the instance is shown to walk that skin, so the recorded section
+and the index array its triangle call plans against are one skin by
+construction. The triangle call keeps the two older repairs for that section's
+exact stock arguments: the 66a64d5 triangle-start remap, with the incoming vertex
+base unchanged, and the e9c68f6 crossing-section skip, with the same one-time
+`m2native-indices: picking skips section` warning. A legacy frame never repairs
+positions or chunks indices, so a wholly-above section of an uncertified skin
+still picks against positions read through the 16-bit lookup. Unnoted skins, and
+collision's own triangle call, run outside every geometry scope and reach the
+next link unchanged.
 
 The bridge scopes its context to the native geometry call and observes all three
 native fillers, forwarding their original arguments. The filler identifies the
@@ -99,14 +113,38 @@ lower sections keep their native positions. Native filters, allocation and
 triangle arbitration remain in charge. A 3,072-index stack block in a separate
 non-inlined function submits complete local triangles with vertex base zero,
 carrying currentHit and bestDepth through every chunk. No patch-owned heap
-allocation is added. An unsupported call inside an admitted wide scope is rejected
-without inventing a hit or updating depth, with one process-lifetime warning.
+allocation is added. The chunk loop works from a snapshot of the section, triangle
+start and skin taken at entry, and stops, keeping the native prefix result, if the
+certificate or the frame's preparation epoch changes between chunks. An admitted
+section with no indices or no vertices forwards its original call without a
+warning. Any other unsupported call inside an admitted wide scope warns once per
+process and never invents a hit or updates depth: a low section identified by its
+filler is forwarded through the triangle-start remap with its own vertex base,
+while a crossing or wholly-above section, or one that was not identified, keeps
+the native no-hit result.
 
 `test_wide_indices_picking.py` pins the gate, lifetime, argument forwarding,
-section identity, native blend selection, bounds, chunking and logging. The C++
-window target additionally exercises real production modulo arithmetic, all
-21,846 complete u16 section counts, 393,216 additional wrapped index samples,
-array-slot membership, bone-reference bounds and simple projection cases. Neither
+section identity, native blend selection, bounds, chunking and logging. The
+one-fill, one-triangle handshake both frame kinds depend on is pinned as whole
+normalised bodies: the fill hook (clear the pending fill, forward, then record),
+the legacy section record, the start of the admitted record, the triangle hook
+(read and then clear the pending fill before either frame kind is dispatched, the
+full admitted match, then the empty, ready and reject dispatch), the legacy
+triangle call and the reject branch. So are the predicates those bodies rely on:
+the fill and triangle frame lookups (every key one conjunction), the geometry
+hook (the live skin is followed only on the legacy path that set it), the legacy
+frame's live skin, note match, note lookup and currency gate, and every picking
+warning and record (each warning's once flag, each record's per-note bit and the
+shared 24-record cap). These are text contracts: a changed body fails them, but
+they do not execute the hooks. The C++ window target additionally
+exercises real production modulo arithmetic, all 21,846 complete u16 section
+counts, 393,216 additional wrapped index samples, array-slot membership,
+bone-reference bounds, simple projection cases and the legacy-frame plan. That
+plan covers the triangle-start fold, the exact stock-call match shared with
+admitted frames, the crossing skip and the remap target. Its fixtures are
+VirnaAoA00 (27,731 vertices; sections 2 and 3 are remapped to 66,036 and 126,036)
+and Kasumi sections 59 (skipped) and 60 (remapped). Every single-argument change
+to each stock call, and every other section's call, is forwarded unchanged. Neither
 source contracts nor these arithmetic checks execute WoW or prove ABI, hook-chain,
 pose, floating-point or picking behavior. For a portable arithmetic-only run:
 
@@ -120,6 +158,17 @@ under a separate 24-record process cap. `positionRepair=1` means dense positions
 were submitted, not that the section was hit. `filler=0/1/2` identifies the
 SSE/scalar/single-bone entry actually observed. Repeated batches and the second
 native mode can test a section more than once. Restart for another capped log
-sample. Thread affinity and same-scene reentrancy must be checked locally; the
-scoped registry link is not a lock or an asset-lifetime pin. Native hover,
-wrong-place selection, movement, occlusion and rendering remain separate checks.
+sample. Under the same cap, `m2wide-beta: picking-reject` samples each reject
+reason once per note: `reason` 1 certificate, mode, projection or distance at the
+fill; 2 section pointer; 3 filler pairing, placement or vertex bounds; 4 triangle
+range; 5 scratch or bone palette; 6 triangle arguments or a missing fill; 7 an
+index outside its window; 8 a change between chunks. `remapped=1` means a low
+section was forwarded through the remap. `m2wide-beta: picking-legacy` is written
+once per note when a skin above 65,536 vertices picks through a legacy frame;
+`certificate=1` means a conversion was published but does not match the live
+instance. The one-time reject warning now names the first `reason`. The
+installation line ends `unadmitted noted skins keep the triangle-start remap and
+skip crossing sections`. Thread affinity and same-scene reentrancy must be
+checked locally; the scoped registry link is not a lock or an asset-lifetime
+pin. Native hover, wrong-place selection, movement, occlusion and rendering
+remain separate checks.
