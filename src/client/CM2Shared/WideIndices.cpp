@@ -181,6 +181,18 @@ namespace
         return header->bones.count == 1 && (flags & off::kM2FileFlagSingleBoneGlobal) != 0;
     }
 
+    // The certificate borrows only immutable source identities, never a retained pose. It is
+    // published with a completed shared conversion and checked through the current live instance.
+    struct PickingSource
+    {
+        const M2Header* header = nullptr;
+        uint32_t vertices = 0, vertexCount = 0;
+        const M2SkinSection* sections = nullptr;
+        uint32_t sectionCount = 0;
+        const uint16_t* lookup = nullptr;
+    };
+    struct PickingCall;
+
     // Shared with picking: a converted binding is recorded only after a completed refill.
     struct WideSkinNote
     {
@@ -190,9 +202,23 @@ namespace
         uint32_t vertexCount;
         void* model;
         void* convertedSharedIb;
+        PickingSource pickingSource = {};
+        PickingCall* pickingCall = nullptr; // borrowed stack frame, scoped to kHitTestGeometry
+        uint64_t pickingGeneration = 0;     // invalidates in-flight calls across a rebuild
+        uint32_t pickingLogged = 0;         // low / crossing / wholly-above sample bits
     };
     constexpr size_t kMaxWideSkins = 64;
-    WideSkinNote g_wideSkins[kMaxWideSkins] = {};
+    // Keep the added hook-chain slots and log budget in the existing registry too. No second
+    // global picking context, pose cache, heap owner or thread-local registry is introduced.
+    struct WideSkinRegistry
+    {
+        WideSkinNote notes[kMaxWideSkins] = {};
+        off::M2_HitTestGeometryFn geometryNext = nullptr;
+        off::M2_FillHitTestVerticesFn fillNext[3] = {};
+        uint32_t pickingLogs = 0;
+        WideSkinNote& operator[](size_t index) { return notes[index]; }
+    };
+    WideSkinRegistry g_wideSkins = {};
     size_t g_wideSkinCount = 0;
 
     WideSkinNote* NoteWideSkin(const M2SkinProfile* skin)
@@ -205,7 +231,15 @@ namespace
             // Instance-index notes must not erase a still-valid shared conversion.
             if (n.indices != skin->indices || n.indexCount != skin->indexCount
                 || n.vertexCount != skin->vertexCount)
+            {
+                // A synchronous nested refill must not leave the geometry scope's stack link
+                // dangling. Its old certificate no longer matches, so its pending pick is rejected.
+                PickingCall* active = n.pickingCall;
+                const uint64_t generation = n.pickingGeneration + 1;
                 n = { skin, skin->indices, skin->indexCount, skin->vertexCount, nullptr, nullptr };
+                n.pickingCall = active;
+                n.pickingGeneration = generation;
+            }
             return &n;
         }
         if (g_wideSkinCount == kMaxWideSkins) return nullptr;
@@ -217,7 +251,11 @@ namespace
     void ClearSharedConversion(void* model)
     {
         for (size_t i = 0; i < g_wideSkinCount; ++i)
-            if (g_wideSkins[i].model == model) g_wideSkins[i].convertedSharedIb = nullptr;
+            if (g_wideSkins[i].model == model)
+            {
+                g_wideSkins[i].convertedSharedIb = nullptr;
+                ++g_wideSkins[i].pickingGeneration;
+            }
     }
 
     WideSkinNote* ConvertedBinding(void* buffer)
@@ -446,6 +484,10 @@ namespace
         {
             windowNote->model = model;
             windowNote->convertedSharedIb = buffer;
+            const auto* header = *At<M2Header*>(model, off::kOffModelHeader);
+            windowNote->pickingSource = { header, header->vertices.offset, header->vertices.count,
+                                          skin.submeshes, skin.submeshCount, skin.vertexLookup };
+            ++windowNote->pickingGeneration;
             if (g_sharedRefillLogs < kSharedRefillLogLimit)
             {
                 ++g_sharedRefillLogs;
@@ -771,72 +813,316 @@ namespace
         if (streamOffset) *streamOffset = savedOffset;
     }
 
-    // ---- picking: the scene's ray-versus-geometry pass hands the triangle test a [begin, end) pair it
-    // computed from the submesh's 16-bit start, so a widened submesh is tested 65536 indices too early
-    // and the test walks off its scratch window (crash at 0x0081D569 on a 44k-triangle model, 2026-09-07).
-    // A wide skin is noted when its index buffer is filled (not before, and not past the registry); a pair that lands inside a noted skin's
-    // triangle array and matches a submesh's low-16 start and count is remapped to the widened start.
-    // The vertex side has no such repair. The test subtracts the section's 16-bit vertex start from
-    // each 16-bit index as a signed value, so in a section whose vertices pass a multiple of 65536 the
-    // wrapped indices fall below the start and the test reads before its scratch buffer (ERROR #132 at
-    // 0x0081D55C on the cursor's first hover over Kasumi's hair, 2026-09-23). Until the test is handed a
-    // rebased copy with vertex base 0, a matched section that crosses is skipped: currentHit returned
-    // unchanged, with *bestDepth untouched, is the stock result for a range that hits nothing
-    // (0x0081D66E), so a hit found earlier in the walk survives. The skipped section cannot be hovered
-    // meanwhile, and a section wholly above 65536 still picks against positions read through the 16-bit
-    // vertex lookup.
+    // ---- picking: keep the native batch filters, scratch allocator and hit arbitration. A scoped
+    // geometry call is admitted only by a live, validated shared-window note. The filler entry gives
+    // the exact section and blend path; guessing a section from a truncated triangle range cannot
+    // distinguish aliases. The fillers still run through their chains with the original arguments.
+    // Only their wrapped CPU positions are replaced, from the dense source and current bone palette.
+    // The triangle chain receives bounded local-index chunks and vertex base zero, in file order.
     off::M2_SceneTriangleHitTestFn g_origTriangleHitTest = nullptr;
+    constexpr uint32_t kPickingLogLimit = 24;
+
+    struct PickingCall
+    {
+        WideSkinNote* note;
+        void* scene;
+        void* instance;
+        const M2SkinProfile* skin;
+        PickingSource source;
+        uint64_t generation;
+        int mode;
+        float* projection;
+        float distance;
+        float* point;
+        int candidate;
+        float* bestDepth;
+        M2SkinSection section = {};
+        uint32_t sectionIndex = 0, first = 0, triangleStart = 0;
+        unsigned filler = 0;
+        bool pending = false, ready = false;
+    };
+
+    // A registry address is only a comparison key. In particular, never dereference n.skin to
+    // decide whether a freed note is still valid; follow the instance the native caller owns.
+    bool CurrentPickingSource(const WideSkinNote& n, void* instance)
+    {
+        if (!instance || !n.convertedSharedIb) return false;
+        void* model = *At<void*>(instance, off::kOffInstModel);
+        if (!model || n.model != model
+            || *At<void*>(model, off::kOffSharedIndexBuf) != n.convertedSharedIb) return false;
+        const auto* skin = *At<M2SkinProfile*>(model, off::kOffModelSkin);
+        const auto* header = *At<M2Header*>(model, off::kOffModelHeader);
+        return skin && header && skin == n.skin && header == n.pickingSource.header
+               && skin->indices == n.indices && skin->indexCount == n.indexCount
+               && skin->vertexCount == n.vertexCount && skin->vertexCount > 0x10000u
+               && skin->submeshes == n.pickingSource.sections
+               && skin->submeshCount == n.pickingSource.sectionCount
+               && skin->vertexLookup == n.pickingSource.lookup
+               && header->vertices.offset == n.pickingSource.vertices
+               && header->vertices.count == n.pickingSource.vertexCount;
+    }
+
+    WideSkinNote* PickingNote(void* instance)
+    {
+        void* model = instance ? *At<void*>(instance, off::kOffInstModel) : nullptr;
+        if (!model) return nullptr;
+        for (size_t i = 0; i < g_wideSkinCount; ++i)
+        {
+            WideSkinNote& n = g_wideSkins[i];
+            if (n.model == model && CurrentPickingSource(n, instance)) return &n;
+        }
+        return nullptr;
+    }
+
+    bool CurrentPickingCall(const PickingCall& call)
+    {
+        // Check the snapshot too: a nested rebuild may publish a different valid certificate in
+        // the same note. It must not silently change the source of this in-flight geometry call.
+        const PickingSource& live = call.note->pickingSource;
+        return call.generation == call.note->pickingGeneration
+               && CurrentPickingSource(*call.note, call.instance)
+               && call.skin == call.note->skin && call.source.header == live.header
+               && call.source.vertices == live.vertices && call.source.vertexCount == live.vertexCount
+               && call.source.sections == live.sections && call.source.sectionCount == live.sectionCount
+               && call.source.lookup == live.lookup;
+    }
+
+    void WarnPicking(const PickingCall& call)
+    {
+        static bool warned = false;
+        if (!warned)
+        {
+            warned = true;
+            WLOG_WARN("m2native-indices: picking rejects an unsupported validated-wide call "
+                      "(scene=%p instance=%p skin=%p); no hit or depth is invented; "
+                      "check source identity, section/filler pairing, bounds and bone palette; "
+                      "later rejects are silent", call.scene, call.instance, call.skin);
+        }
+    }
+
+    // Keep the stack context off the unnoted path. The owner restores its predecessor on every
+    // ordinary C++ return, including nested calls; it is not a lifetime pin or a thread lock.
+    __declspec(noinline) int RunPickingGeometry(WideSkinNote& note, void* scene, void* edx,
+                                               void* instance, int mode, float* projection,
+                                               float distance, float* point, int candidate,
+                                               float* bestDepth, int currentHit)
+    {
+        PickingCall call = { &note, scene, instance, note.skin, note.pickingSource, note.pickingGeneration,
+                             mode, projection, distance, point, candidate, bestDepth };
+        struct Scope
+        {
+            WideSkinNote& note;
+            PickingCall* previous;
+            ~Scope() { note.pickingCall = previous; }
+        } scope { note, note.pickingCall };
+        note.pickingCall = &call;
+        return g_wideSkins.geometryNext(scene, edx, instance, mode, projection, distance,
+                                        point, candidate, bestDepth, currentHit);
+    }
+
+    int __fastcall hkHitTestGeometry(void* scene, void* edx, void* instance, int mode,
+                                     float* projection, float distance, float* point,
+                                     int candidate, float* bestDepth, int currentHit)
+    {
+        WideSkinNote* note = PickingNote(instance);
+        if (!note)
+            return g_wideSkins.geometryNext(scene, edx, instance, mode, projection, distance,
+                                            point, candidate, bestDepth, currentHit);
+        return RunPickingGeometry(*note, scene, edx, instance, mode, projection, distance,
+                                   point, candidate, bestDepth, currentHit);
+    }
+
+    PickingCall* PickingFillCall(void* scene, void* instance, void* skin)
+    {
+        for (size_t i = 0; i < g_wideSkinCount; ++i)
+        {
+            PickingCall* call = g_wideSkins[i].pickingCall;
+            if (call && call->scene == scene && call->instance == instance && call->skin == skin)
+                return call;
+        }
+        return nullptr;
+    }
+
+    bool RefillPickingPositions(PickingCall& call)
+    {
+        const M2SkinSection& section = call.section;
+        auto* dst = *At<float*>(call.scene, off::kOffSceneHitTestPositions);
+        if (!dst || *At<uint32_t>(call.scene, off::kOffSceneHitTestCapacity) < section.vertexCount)
+            return false;
+        if (!window::NeedsPickingPositions(call.first, section.vertexCount)) return true;
+        void* palette = *At<void*>(call.instance, off::kOffInstBonePalette);
+        if (!palette || (call.filler == 0 && (reinterpret_cast<uintptr_t>(palette) & 15u))) return false;
+        const auto* source = reinterpret_cast<const uint8_t*>(call.source.vertices);
+        const uint32_t boneCount = call.source.header->bones.count;
+        // Both blended fillers start with identity and a cached (weights, bones) pair of (0, 0).
+        // Reuse the native blend, including its first-zero termination and its scalar/SSE choice.
+        alignas(16) float blended[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+        uint32_t lastWeights = 0, lastBones = 0;
+        for (uint32_t k = 0; k < section.vertexCount; ++k)
+        {
+            const uint8_t* vertex = source + size_t(call.first + k) * off::kModelVertexStride;
+            uint32_t weights, bones;
+            std::memcpy(&weights, vertex + off::kOffVertexWeights, sizeof weights);
+            std::memcpy(&bones, vertex + off::kOffVertexBoneSlots, sizeof bones);
+            const float* matrix = blended;
+            if (call.filler == 2)
+            {
+                if (!window::PickingBonesFit(weights, bones, boneCount, true)) return false;
+                matrix = At<float>(palette, size_t(bones & 0xFFu) * off::kBonePaletteStride);
+            }
+            else if (weights != lastWeights || bones != lastBones)
+            {
+                if (!window::PickingBonesFit(weights, bones, boneCount, false)) return false;
+                const uintptr_t blend = call.filler == 0 ? off::kBlendHitTestMatrixSse
+                                                         : off::kBlendHitTestMatrixScalar;
+                wxl::game::Native<off::M2_BlendHitTestMatrixFn>(blend)(palette, weights, bones, blended);
+                lastWeights = weights;
+                lastBones = bones;
+            }
+            float position[3];
+            wxl::game::Native<off::C3_TransformFn>(off::kVec3Transform)(
+                position, reinterpret_cast<const float*>(vertex + off::kOffVertexPosition), matrix);
+            const auto projected = window::ProjectPickingPosition(
+                position, reinterpret_cast<const float*>(vertex + off::kOffVertexNormal), matrix,
+                call.mode, call.projection, call.distance);
+            std::memcpy(dst + size_t(k) * 3, &projected, sizeof projected);
+        }
+        return true;
+    }
+
+    void PreparePickingSection(PickingCall& call, void* section, unsigned filler,
+                               int mode, float* projection, float distance)
+    {
+        call.pending = true;
+        call.ready = false;
+        if (!CurrentPickingCall(call) || mode != call.mode || projection != call.projection
+            || std::memcmp(&distance, &call.distance, sizeof distance) != 0 || !projection)
+            return;
+        uint32_t index = 0;
+        if (!window::ArraySlot(reinterpret_cast<uintptr_t>(section),
+                                reinterpret_cast<uintptr_t>(call.source.sections),
+                                call.source.sectionCount, sizeof(M2SkinSection), index)) return;
+        call.sectionIndex = index;
+        call.section = call.source.sections[index];
+        call.filler = filler;
+        const M2SkinSection& sec = call.section;
+        if ((filler == 2) != (sec.boneInfluences == 1)
+            || !WideVertexStart(*call.skin, index, call.first)
+            || !window::Fits(call.first, sec.vertexStart, sec.vertexCount, call.skin->vertexCount)
+            || !window::Fits(call.first, sec.vertexStart, sec.vertexCount, call.source.vertexCount)) return;
+        call.triangleStart = TriangleStart(sec, *call.skin);
+        if (!window::TriangleRange(call.triangleStart, sec.indexCount, call.skin->indexCount)) return;
+        call.ready = RefillPickingPositions(call);
+    }
+
+    template <unsigned Filler>
+    void __fastcall hkFillPickingVertices(void* scene, void* edx, void* instance, void* skin,
+                                          void* section, int mode, float* projection, float distance)
+    {
+        static_assert(Filler < 3);
+        PickingCall* call = PickingFillCall(scene, instance, skin);
+        if (call) call->pending = false;
+        // Do not replace the filler or forge an instance/header/skin. Downstream hooks get the
+        // same arguments and the native code keeps owning its original fill. For upper sections
+        // the extra dense fill below overwrites those incorrect positions, not their allocation.
+        g_wideSkins.fillNext[Filler](scene, edx, instance, skin, section, mode, projection, distance);
+        if (call) PreparePickingSection(*call, section, Filler, mode, projection, distance);
+    }
+
+    PickingCall* PickingTriangleCall(void* scene, float* point, int mode, int candidate, float* bestDepth)
+    {
+        for (size_t i = 0; i < g_wideSkinCount; ++i)
+        {
+            PickingCall* call = g_wideSkins[i].pickingCall;
+            if (call && call->scene == scene && call->point == point && call->mode == mode
+                && call->candidate == candidate && call->bestDepth == bestDepth) return call;
+        }
+        return nullptr;
+    }
+
+    void LogPicking(PickingCall& call, uint32_t chunks)
+    {
+        const uint32_t bit = window::CrossesWrap(call.section.vertexStart, call.section.vertexCount) ? 2u
+                             : call.first >= 0x10000u ? 4u : 1u;
+        if ((call.note->pickingLogged & bit) || g_wideSkins.pickingLogs >= kPickingLogLimit) return;
+        call.note->pickingLogged |= bit;
+        ++g_wideSkins.pickingLogs;
+        const uint16_t* raw = call.skin->indices + call.triangleStart;
+        WLOG_INFO("m2wide-beta: picking record=%u instance=%p skin=%p section=%u "
+                  "wideStart=%u vertexStartLow=%u vertices=%u triangleStart=%u indices=%u "
+                  "positionRepair=%u filler=%u chunks=%u raw=(%u,%u,%u) local=(%u,%u,%u)",
+                  g_wideSkins.pickingLogs, call.instance, call.skin, call.sectionIndex,
+                  call.first, unsigned(call.section.vertexStart), unsigned(call.section.vertexCount),
+                  call.triangleStart, unsigned(call.section.indexCount),
+                  unsigned(window::NeedsPickingPositions(call.first, call.section.vertexCount)),
+                  call.filler, chunks, unsigned(raw[0]), unsigned(raw[1]), unsigned(raw[2]),
+                  unsigned(window::LocalIndex(raw[0], call.section.vertexStart)),
+                  unsigned(window::LocalIndex(raw[1], call.section.vertexStart)),
+                  unsigned(window::LocalIndex(raw[2], call.section.vertexStart)));
+        wxl::log::Flush();
+    }
+
+    // A separate, non-inlined frame is important: an unnoted triangle call must not reserve or
+    // probe the 6 KiB local array. Validate the entire section before any chunk can update a hit.
+    __declspec(noinline) int TestPickingSection(PickingCall& call, void* edx, float* point, int mode,
+                                               int candidate, float* bestDepth, int currentHit)
+    {
+        const M2SkinSection& sec = call.section;
+        const uint16_t* source = call.skin->indices + call.triangleStart;
+        for (uint32_t k = 0; k < sec.indexCount; ++k)
+            if (window::LocalIndex(source[k], sec.vertexStart) >= sec.vertexCount)
+            {
+                WarnPicking(call);
+                return currentHit;
+            }
+        uint16_t local[window::kPickingIndexChunk];
+        uint32_t chunks = 0;
+        for (uint32_t done = 0; done < sec.indexCount; )
+        {
+            // A downstream hook may have triggered an observed rebuild during the last chunk.
+            // Keep any genuine result already returned, but do not read the retired payload again.
+            if (!CurrentPickingCall(call))
+            {
+                WarnPicking(call);
+                return currentHit;
+            }
+            const uint32_t count = window::PickingChunk(sec.indexCount - done);
+            for (uint32_t k = 0; k < count; ++k)
+                local[k] = window::LocalIndex(source[done + k], sec.vertexStart);
+            // Every chunk passes on the last return and the same depth pointer. Neither zero nor
+            // candidate substitutes for currentHit; the native triangle predicate still decides.
+            currentHit = g_origTriangleHitTest(call.scene, edx, local, local + count, 0,
+                                               point, mode, candidate, bestDepth, currentHit);
+            done += count;
+            ++chunks;
+        }
+        if (chunks && CurrentPickingCall(call)) LogPicking(call, chunks);
+        return currentHit;
+    }
 
     int __fastcall hkSceneTriangleHitTest(void* scratch, void* edx, uint16_t* indexBegin, uint16_t* indexEnd,
                                           int vertexBase, float* point, int mode, int candidate,
                                           float* bestDepth, int currentHit)
     {
-        if (indexBegin && indexEnd > indexBegin)
+        PickingCall* call = PickingTriangleCall(scratch, point, mode, candidate, bestDepth);
+        if (!call)
+            return g_origTriangleHitTest(scratch, edx, indexBegin, indexEnd, vertexBase,
+                                         point, mode, candidate, bestDepth, currentHit);
+        const bool pending = call->pending;
+        call->pending = false; // a fill belongs to one triangle call, not a later batch or collision
+        if (!pending || !call->ready || !CurrentPickingCall(*call)
+            || vertexBase != int(call->section.vertexStart)
+            || indexBegin != call->skin->indices + call->section.indexStart
+            || indexEnd != indexBegin + call->section.indexCount)
         {
-            for (size_t i = 0; i < g_wideSkinCount; ++i)
-            {
-                const WideSkinNote& n = g_wideSkins[i];
-                if (indexBegin < n.indices || indexBegin >= n.indices + n.indexCount) continue;
-                const M2SkinProfile& skin = *n.skin;
-                if (skin.indices != n.indices || skin.indexCount != n.indexCount || !skin.submeshes) break;
-                const uint32_t low   = static_cast<uint32_t>(indexBegin - n.indices);
-                const uint32_t count = static_cast<uint32_t>(indexEnd - indexBegin);
-                if (low > 0xFFFFu) break;      // already a full address: not a truncated one
-                for (uint32_t k = 0; k < skin.submeshCount; ++k)
-                {
-                    const M2SkinSection& sec = skin.submeshes[k];
-                    if (sec.indexStart != low || sec.indexCount != count) continue;
-                    if (window::CrossesWrap(sec.vertexStart, sec.vertexCount))
-                    {
-                        // Said once. The wide start is walked only for this message, so the per-frame
-                        // cost of the guard stays the one comparison above.
-                        static bool warnedCrossing = false;
-                        if (!warnedCrossing)
-                        {
-                            warnedCrossing = true;
-                            uint32_t wideStart = 0;
-                            const bool wideValid = WideVertexStart(skin, k, wideStart);
-                            WLOG_WARN("m2native-indices: picking skips section %u of model=%p skin=%p "
-                                      "(vertexStart low=%u wide=%u wideValid=%u, vertexCount=%u) until the "
-                                      "hit test handles wide skins: its 16-bit indices wrap below its 16-bit "
-                                      "start; later skips are silent",
-                                      k, n.model, n.skin, unsigned(sec.vertexStart), wideStart,
-                                      unsigned(wideValid), unsigned(sec.vertexCount));
-                        }
-                        return currentHit;
-                    }
-                    const uint32_t wide = TriangleStart(sec, skin);
-                    if (wide != sec.indexStart)
-                    {
-                        indexBegin = const_cast<uint16_t*>(n.indices) + wide;
-                        indexEnd   = indexBegin + count;
-                    }
-                    break;
-                }
-                break;
-            }
+            WarnPicking(*call);
+            return currentHit;
         }
-        return g_origTriangleHitTest(scratch, edx, indexBegin, indexEnd, vertexBase, point, mode, candidate, bestDepth, currentHit);
+        // Empty sections already have the native no-hit meaning; preserve their chain call too.
+        if (!call->section.indexCount)
+            return g_origTriangleHitTest(scratch, edx, indexBegin, indexEnd, vertexBase,
+                                         point, mode, candidate, bestDepth, currentHit);
+        return TestPickingSection(*call, edx, point, mode, candidate, bestDepth, currentHit);
     }
 
     uint32_t __fastcall hkSharedSetVertices(void* model, void* edx, int texCoordSet)
@@ -868,13 +1154,25 @@ namespace
         if (!wxl::hook::Install("M2SharedSetVertices", off::kSharedSetVertices,
                                 &hkSharedSetVertices, &g_origSharedSetVertices))
             return false;
+        if (!wxl::hook::Install("M2HitTestGeometry", off::kHitTestGeometry,
+                                &hkHitTestGeometry, &g_wideSkins.geometryNext))
+            return false;
+        if (!wxl::hook::Install("M2FillHitTestVerticesSse", off::kFillHitTestVerticesSse,
+                                &hkFillPickingVertices<0>, &g_wideSkins.fillNext[0]))
+            return false;
+        if (!wxl::hook::Install("M2FillHitTestVerticesScalar", off::kFillHitTestVerticesScalar,
+                                &hkFillPickingVertices<1>, &g_wideSkins.fillNext[1]))
+            return false;
+        if (!wxl::hook::Install("M2FillHitTestVerticesSingle", off::kFillHitTestVerticesSingle,
+                                &hkFillPickingVertices<2>, &g_wideSkins.fillNext[2]))
+            return false;
         if (!wxl::hook::Install("M2SceneTriangleHitTest", off::kSceneTriangleHitTest,
                                 &hkSceneTriangleHitTest, &g_origTriangleHitTest))
             return false;
         WLOG_INFO("m2native-indices: submesh triangle starts read and drawn as "
                   "(level << 16) | indexStart; dense wide-vertex refill registered; "
                   "section vertex windows apply to local indices and validated single-copy shared conversions; "
-                  "picking skips noted sections whose vertices cross a 16-bit wrap");
+                  "picking repairs validated wide positions and uses bounded local triangle chunks");
         return true;
     }
 }

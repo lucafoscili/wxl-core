@@ -2111,6 +2111,35 @@ namespace wxl::offsets::game::m2
     /// Replace ray-versus-model-geometry picking, so extension-owned or modern-format meshes become
     /// selectable. __thiscall, 8 stack args.
     constexpr uintptr_t kHitTestGeometry                   = 0x0081DAF0;
+    // Build 12340: 0x81DAF0 takes scene in ECX and eight stack args (ret 20h).
+    // The EDX placeholder preserves the thiscall boundary through a fastcall detour.
+    using M2_HitTestGeometryFn = int(__fastcall*)(
+        void* scene, void* edx, void* instance, int mode, float* projection, float distance,
+        float* point, int candidate, float* bestDepth, int currentHit);
+
+    // The three section-position fillers called at 0x81DCCF / 0x81DCDF / 0x81DCE6.
+    // Each takes scene in ECX, then six stack args, and returns with ret 18h. Observing
+    // their section argument identifies the exact batch section, even when low index
+    // ranges alias. The selected entry also preserves the client's blend-path choice.
+    constexpr uintptr_t kFillHitTestVerticesSse             = 0x0081D680;
+    constexpr uintptr_t kFillHitTestVerticesScalar          = 0x0081D830;
+    constexpr uintptr_t kFillHitTestVerticesSingle          = 0x0081D9C0;
+    using M2_FillHitTestVerticesFn = void(__fastcall*)(
+        void* scene, void* edx, void* instance, void* skin, void* section,
+        int mode, float* projection, float distance);
+
+    // cdecl helpers reached by the blended fillers at 0x81D74B / 0x81D8E6.
+    // Packed weights and model bone indices are passed by VALUE, not by pointer.
+    // The SSE helper uses movaps: palette and output matrix must be 16-byte aligned.
+    constexpr uintptr_t kBlendHitTestMatrixSse              = 0x0081D2C0;
+    constexpr uintptr_t kBlendHitTestMatrixScalar           = 0x0081D3D0;
+    using M2_BlendHitTestMatrixFn = void(__cdecl*)(
+        const void* palette, uint32_t weights, uint32_t bones, float* matrix);
+
+    // Scene scratch read at 0x81D528; capacity checked/grown at 0x81DC01-0x81DCAE.
+    // Positions are three floats, not raw M2 vertex records; the native allocator owns them.
+    constexpr size_t kOffSceneHitTestPositions              = 0x124;
+    constexpr size_t kOffSceneHitTestCapacity               = 0x128;
     /// Replace ray-versus-model-collision-mesh testing, which is what physics and line-of-sight queries
     /// actually consult. __thiscall, 8 stack args.
     constexpr uintptr_t kHitTestCollisionMesh              = 0x0081DD50;
@@ -2212,6 +2241,7 @@ namespace wxl::offsets::game::m2
     constexpr size_t kOffVertexPosition   = 0x00; // float[3]
     constexpr size_t kOffVertexWeights    = 0x0C; // uint8[4], one per slot, summing to 255
     constexpr size_t kOffVertexBoneSlots  = 0x10; // uint8[4] palette slots; the one field the fill rewrites
+    constexpr size_t kOffVertexNormal     = 0x14; // float[3], read by picking at 0x81D76A-0x81D7AA
     /// Catch release of a model's GPU vertex and index pools, needed to keep extension-owned buffers
     /// from outliving them. __thiscall, caller-cleaned.
     constexpr uintptr_t kSharedDestroyBuffers              = 0x008368B0;

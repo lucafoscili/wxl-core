@@ -86,8 +86,40 @@ cmake --build build --config Release --target wxl-vertex-window-test
 ```
 
 This candidate does not add multi-copy/doodad, per-instance/local-group,
-CPU-skinned, or extension-provided vertex-buffer support. CPU picking has the
-existing triangle-start correction and, since the crossing guard, skips a noted
-section whose vertices cross a 16-bit wrap instead of letting the stock test read
-out of bounds (`test_wide_indices_picking.py`); vertex-address widening there is
-not established. Native temporal and rear/side rendering remain separate checks.
+CPU-skinned rendering, or extension-provided vertex-buffer support. The picking
+bridge now targets only a current, validated shared-window conversion, not every
+skin with a large index array. Unnoted skins, index-only notes and invalidated
+certificates forward the original arguments; they are not a general crash guard.
+
+The bridge scopes its context to the native geometry call and observes all three
+native fillers, forwarding their original arguments. The filler identifies the
+exact section, not the first section sharing a truncated range. Crossing and
+wholly-above sections get dense CPU positions from the current bone palette;
+lower sections keep their native positions. Native filters, allocation and
+triangle arbitration remain in charge. A 3,072-index stack block in a separate
+non-inlined function submits complete local triangles with vertex base zero,
+carrying currentHit and bestDepth through every chunk. No patch-owned heap
+allocation is added. An unsupported call inside an admitted wide scope is rejected
+without inventing a hit or updating depth, with one process-lifetime warning.
+
+`test_wide_indices_picking.py` pins the gate, lifetime, argument forwarding,
+section identity, native blend selection, bounds, chunking and logging. The C++
+window target additionally exercises real production modulo arithmetic, all
+21,846 complete u16 section counts, 393,216 additional wrapped index samples,
+array-slot membership, bone-reference bounds and simple projection cases. Neither
+source contracts nor these arithmetic checks execute WoW or prove ABI, hook-chain,
+pose, floating-point or picking behavior. For a portable arithmetic-only run:
+
+```sh
+c++ -std=c++17 -Isrc tests/vertex_window_test.cpp -o vertex-window-test
+./vertex-window-test
+```
+
+`m2wide-beta: picking` samples at most once per low/crossing/above class per note,
+under a separate 24-record process cap. `positionRepair=1` means dense positions
+were submitted, not that the section was hit. `filler=0/1/2` identifies the
+SSE/scalar/single-bone entry actually observed. Repeated batches and the second
+native mode can test a section more than once. Restart for another capped log
+sample. Thread affinity and same-scene reentrancy must be checked locally; the
+scoped registry link is not a lock or an asset-lifetime pin. Native hover,
+wrong-place selection, movement, occlusion and rendering remain separate checks.
