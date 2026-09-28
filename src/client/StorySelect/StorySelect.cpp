@@ -1,6 +1,6 @@
 // Actual selected/equipped actor only; no new model, world unit or network operation.
 // GPL-3.0-or-later.
-#ifdef WXL_STORY_SELECT_TRIAL
+#if defined(WXL_STORY_SELECT_TRIAL) || defined(WXL_CHARACTER_CAPACITY_TRIAL)
 #include "Performer.hpp"
 #include <cstdio>
 #include <cstring>
@@ -13,6 +13,7 @@
 #include "game/Script.hpp"
 #include "offsets/game/M2.hpp"
 #include "offsets/game/StorySelect.hpp"
+#include "offsets/game/CharacterCapacity.hpp"
 
 namespace
 {
@@ -33,7 +34,10 @@ namespace
     };
     Session g_session;
     uint32_t g_generation = 0;
-    bool g_ready = false;
+    bool g_ready = false, g_probeReady = false, g_capacityReady = false;
+    uint32_t g_rosterRevision = 0;
+    using RefreshFn = void (__cdecl*)();
+    RefreshFn g_refresh = nullptr;
     glue::RegisterMethodsFn g_register = nullptr;
     script::ValidateCallbackFn g_validate = nullptr;
     script::Function g_select = nullptr;
@@ -45,7 +49,7 @@ namespace
         result.index = Read<int>(off::kSelected);
         const auto count = Read<uint32_t>(off::kCount);
         const auto rows = Read<uintptr_t>(off::kRows);
-        if (!result.frame || !rows || result.index < 0 || unsigned(result.index) >= count || count > 10)
+        if (!result.frame || !rows || result.index < 0 || unsigned(result.index) >= count || count > wxl::offsets::game::capacity::kMaximum)
             return {};
         const auto row = rows + result.index * off::kRowStride;
         result.guid = Read<uint64_t>(row);
@@ -120,7 +124,7 @@ namespace
     }
     int __cdecl Probe(void* lua)
     {
-        if (!g_ready) return Reply(lua, false, "unavailable");
+        if (!g_probeReady) return Reply(lua, false, "unavailable");
         const auto self = reinterpret_cast<uintptr_t>(glue::MethodSelf());
         if (!self || self != Read<uintptr_t>(off::kFrame)) return Reply(lua, false, "wrong-frame");
         const char* action = script::ToString(lua, 2);
@@ -159,15 +163,44 @@ namespace
         float placed[16]; motion::Placement(placed, g_session.origin, sample); Place(actor.model, placed);
         return Reply(lua, true, sample.clip == motion::kSalute ? "salute" : (sample.returning ? "return" : "walk"), actor);
     }
+    // Read the live native row, never a copied roster or persisted identity mapping.
+    int __cdecl Identity(void* lua)
+    {
+        const double requested = script::ToNumber(lua, 2);
+        const auto count = Read<uint32_t>(off::kCount);
+        const auto rows = Read<uintptr_t>(off::kRows);
+        char guid[17]{};
+        if (g_capacityReady && glue::MethodSelf() == reinterpret_cast<void*>(Read<uintptr_t>(off::kFrame)) &&
+            rows && count <= wxl::offsets::game::capacity::kMaximum &&
+            requested >= 1 && requested <= count && requested == std::floor(requested))
+        {
+            const auto value = Read<uint64_t>(rows + (static_cast<unsigned>(requested) - 1) * off::kRowStride);
+            if (value) std::snprintf(guid, sizeof(guid), "%016llx", static_cast<unsigned long long>(value));
+        }
+        script::PushString(lua, guid);
+        script::PushNumber(lua, g_rosterRevision);
+        script::PushNumber(lua, count);
+        script::PushNumber(lua, g_capacityReady ? wxl::offsets::game::capacity::kMaximum : 10);
+        return 4;
+    }
+    void __cdecl Refresh()
+    {
+        Stop(); // restore while old rows still own their actors
+        ++g_rosterRevision; // distinguish native refresh selection from user selection
+        g_refresh();
+    }
     void __cdecl Register(void* target)
     {
         g_register(target);
-        static const glue::Method methods[] = {{"WXLStorySelectProbe", Probe}};
-        if (g_ready) glue::AddMethods(target, methods, 1);
+        static const glue::Method probe[] = {{"WXLStorySelectProbe", Probe}};
+        static const glue::Method identity[] = {{"WXLRosterIdentity", Identity}};
+        if (g_probeReady) glue::AddMethods(target, probe, 1);
+        if (g_capacityReady) glue::AddMethods(target, identity, 1);
     }
     void __cdecl Validate(uintptr_t function)
     {
-        if (g_ready && function == reinterpret_cast<uintptr_t>(&Probe)) return;
+        if ((g_probeReady && function == reinterpret_cast<uintptr_t>(&Probe)) ||
+            (g_capacityReady && function == reinterpret_cast<uintptr_t>(&Identity))) return;
         g_validate(function); // never broaden the callback permission to the entire DLL
     }
     int __cdecl Select(void* lua)
@@ -177,7 +210,14 @@ namespace
     }
     bool Install()
     {
-        if (!wxl::config::Env("WXL_STORY_SELECT", true)) return true;
+        bool probe = false, capacity = false;
+#ifdef WXL_STORY_SELECT_TRIAL
+        probe = wxl::config::Env("WXL_STORY_SELECT", true);
+#endif
+#ifdef WXL_CHARACTER_CAPACITY_TRIAL
+        capacity = wxl::config::Env("WXL_CHARACTER_CAPACITY", true);
+#endif
+        if (!probe && !capacity) return true;
         if (reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) != 0x400000) return false;
         const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(0x400000);
         if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0 || dos->e_lfanew > 0x1000) return false;
@@ -190,16 +230,33 @@ namespace
             for (size_t i = 0; i < site.size; ++i) value = (value ^ Read<uint8_t>(site.address + i)) * 0x100000001b3ULL;
             if (value != site.hash) { WLOG_WARN("story-select: incompatible %s; stock only", site.name); return false; }
         }
+        if (capacity)
+        {
+            for (const auto& site : wxl::offsets::game::capacity::kSites)
+            {
+                uint64_t value = 0xcbf29ce484222325ULL;
+                for (size_t i = 0; i < site.size; ++i) value = (value ^ Read<uint8_t>(site.address + i)) * 0x100000001b3ULL;
+                if (value != site.hash) { WLOG_WARN("character-capacity: incompatible %s; stock only", site.name); return false; }
+            }
+        }
         if (!wxl::hook::Install("StorySelectValidate", script::kValidateCallbackSeam, &Validate, &g_validate) ||
             !wxl::hook::Install("StorySelectSelection", off::kSelectCharacter, &Select, &g_select) ||
-            !wxl::hook::Install("StorySelectMethods", glue::kRegisterMethods, &Register, &g_register) ||
-            !wxl::hook::Enable(script::kValidateCallbackSeam) || !wxl::hook::Enable(off::kSelectCharacter) ||
-            !wxl::hook::Enable(glue::kRegisterMethods)) return false;
+            !wxl::hook::Install("StorySelectRefresh", off::kRefresh, &Refresh, &g_refresh) ||
+            !wxl::hook::Install("StorySelectMethods", glue::kRegisterMethods, &Register, &g_register)) return false;
+        // Boot's EnableAll publishes the complete shared hook chains once.
+        if (capacity)
+        {
+            const uint8_t maximum = wxl::offsets::game::capacity::kMaximum;
+            if (!wxl::mem::Patch(reinterpret_cast<void*>(wxl::offsets::game::capacity::kLimitImmediate), &maximum, 1))
+                return false;
+        }
+        g_probeReady = probe;
+        g_capacityReady = capacity;
         g_ready = true;
-        WLOG_INFO("story-select: opt-in equipped-actor probe available; no native acceptance");
+        WLOG_INFO("story-select: capacity50=%d actor-probe=%d; native acceptance pending", capacity, probe);
         return true;
     }
 }
 // Register methods before the client's Glue metatables are built.
-WXL_REGISTER_FEATURE_PHASED("story-select-trial", true, Install, ::wxl::hook::Phase::Boot)
+WXL_REGISTER_FEATURE_PHASED("story-select", true, Install, ::wxl::hook::Phase::Boot)
 #endif

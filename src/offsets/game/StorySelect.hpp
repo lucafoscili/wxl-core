@@ -9,11 +9,13 @@ namespace wxl::offsets::game::story
     constexpr uintptr_t kCount = 0x00B6B23C;
     constexpr uintptr_t kRows = 0x00B6B240;
     constexpr uintptr_t kSelected = 0x00AC436C;
+    constexpr uintptr_t kRefresh = 0x004E4610;
     constexpr uintptr_t kSelectCharacter = 0x004E4580;
     constexpr size_t kRowStride = 0x198, kCustomization = 0x188, kActor = 0x38;
     struct Site { const char* name; uintptr_t address; size_t size; uint64_t hash; };
     // Generated from the inspected executable by the feature's read-only inspector.
     inline constexpr Site kSites[] = {
+        {"refresh", 0x4e4610, 0x1d8, 0xDB07F80DD822068CULL},
         {"setFrame", 0x4e2f60, 0x69, 0xD0FD452398EB440DULL},
         {"selectActor", 0x4e3cd0, 0x809, 0x9A505E1CF7DF7040ULL},
         {"selectLua", 0x4e4580, 0x87, 0x8976FAA6B3032930ULL},
