@@ -125,7 +125,7 @@ namespace
     int __cdecl Probe(void* lua)
     {
         if (!g_probeReady) return Reply(lua, false, "unavailable");
-        const auto self = reinterpret_cast<uintptr_t>(glue::MethodSelf());
+        const auto self = reinterpret_cast<uintptr_t>(glue::MethodSelf(lua));
         if (!self || self != Read<uintptr_t>(off::kFrame)) return Reply(lua, false, "wrong-frame");
         const char* action = script::ToString(lua, 2);
         if (!action) return Reply(lua, false, "missing-action");
@@ -170,7 +170,7 @@ namespace
         const auto count = Read<uint32_t>(off::kCount);
         const auto rows = Read<uintptr_t>(off::kRows);
         char guid[17]{};
-        if (g_capacityReady && glue::MethodSelf() == reinterpret_cast<void*>(Read<uintptr_t>(off::kFrame)) &&
+        if (g_capacityReady && glue::MethodSelf(lua) == reinterpret_cast<void*>(Read<uintptr_t>(off::kFrame)) &&
             rows && count <= wxl::offsets::game::capacity::kMaximum &&
             requested >= 1 && requested <= count && requested == std::floor(requested))
         {

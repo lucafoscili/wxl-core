@@ -64,8 +64,9 @@ namespace wxl::offsets::engine::lua
     using FillScriptMethodTableFn = void(__cdecl*)(void* target, const ScriptMethod* methods, int count);
 
     // The object a script method was invoked on, for a class's type id.
+    // Native custom ABI: Lua state in ESI, typeId on the stack, caller pops.
+    // Do not cast this address to a cdecl function pointer; use glue::MethodSelf(state).
     constexpr uintptr_t kGetObjectThis = 0x004A81B0;
-    using GetObjectThisFn = void*(__cdecl*)(int typeId);
 
     // Type ids are handed out lazily from this counter: a class's slot stays zero until one of its
     // script methods runs and claims the next id. A method added to a class has to claim it the same

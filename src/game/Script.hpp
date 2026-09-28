@@ -25,7 +25,7 @@
  * @brief The arguments a script call carries, and what it hands back.
  *
  * Indices are one-based. A method invoked as frame:Method(a, b) puts the frame at 1 and its first
- * argument at 2 -- read the frame with wxl::game::glue::MethodSelf() rather than from the stack.
+ * argument at 2 -- read the frame with wxl::game::glue::MethodSelf(state).
  *
  * A return value is pushed, and the count of pushes returned from the function.
  */

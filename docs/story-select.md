@@ -1,5 +1,20 @@
 # Native character roster and optional actor probe
 
+**28 September Deck crash:** the initial capacity DLL reached Connected then
+faulted at `0x84D9C4` through `GetObjectThis` and the new identity callback.
+`game/Glue.hpp::MethodSelf` incorrectly called the native custom-ABI helper as
+cdecl: the helper requires callback Lua state in ESI. The compiled identity
+callback held roster count0 in ESI, exactly matching the captured null-state
+read at0x10. The shared helper now takes `state`, sets/preserves ESI explicitly
+and passes the class id on the stack with caller cleanup. Both callers pass
+their original callback state. Capacity, registrations and policy are unchanged.
+Velora `check_glue_abi.py` replays compiled callbacks through the exact native
+object/type/index bytes: the installed DLL reproduces the captured fault; fixed
+roster and optional probe callbacks pass counts0/10/50. Object-table/output
+leaves remain fixture stubs. Native retest is still required; this is not a
+rendering or Deck acceptance claim. Evidence/rebuild custody belongs to the
+Velora selector's `CAPACITY.md` crash checkpoint.
+
 This opt-in, offline-built experiment controls the existing selector's equipped
 actor. It neither creates a model widget nor reconstructs appearance from a
 character name. The local Velora owner is

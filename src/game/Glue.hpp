@@ -70,6 +70,7 @@ namespace wxl::game::glue
 
     /**
      * @brief Reads the frame a script method was invoked on.
+     * @param state Lua state passed to this script callback.
      * @return The frame, or null when called outside a script method.
      *
      * This is the same pointer the 3D render callback receives, so what a method records about a frame
@@ -79,7 +80,7 @@ namespace wxl::game::glue
      * added method may be that one, so it claims the id exactly as the stock methods do -- into the
      * type's own slot, from the shared counter.
      */
-    inline void* MethodSelf()
+    inline void* MethodSelf(void* state)
     {
         int* typeId = reinterpret_cast<int*>(off::kSimpleModelTypeId);
         if (*typeId == 0)
@@ -87,6 +88,24 @@ namespace wxl::game::glue
             int* counter = reinterpret_cast<int*>(loff::kObjectTypeCounter);
             *typeId = ++(*counter);
         }
-        return Native<loff::GetObjectThisFn>(loff::kGetObjectThis)(*typeId);
+        // GetObjectThis is a native custom-ABI helper, not cdecl: every stock
+        // caller loads its callback state into ESI, then pushes the class id.
+        // Preserve the caller's ESI (which may hold a roster count or anything
+        // else), and never infer Lua state from that inherited register.
+        const int id = *typeId;
+        const uintptr_t target = loff::kGetObjectThis;
+        void* result;
+        __asm
+        {
+            push esi
+            mov esi, state
+            push id
+            mov eax, target
+            call eax
+            add esp, 4
+            pop esi
+            mov result, eax
+        }
+        return result;
     }
 }
