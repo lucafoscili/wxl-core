@@ -8,12 +8,12 @@ import pefile
 HEADER = Path(__file__).resolve().parents[1] / 'src/offsets/game/MinimapTracking.hpp'
 
 
-def verify(path):
+def verify(path, *, header=HEADER, label='Tracking'):
     path = Path(path)
     pe = pefile.PE(str(path))
     if pe.OPTIONAL_HEADER.ImageBase != 0x400000 or pe.FILE_HEADER.Machine != 0x14c:
         raise ValueError('Expected fixed-base Win32 client')
-    sites = re.findall(r'\{"(\w+)", (0x[\dA-F]+), (0x[\dA-F]+), (0x[\dA-F]+)ULL\}', HEADER.read_text())
+    sites = re.findall(r'\{"(\w+)", (0x[\dA-F]+), (0x[\dA-F]+), (0x[\dA-F]+)ULL\}', Path(header).read_text(), re.I)
     if not sites:
         raise ValueError('No compatibility fingerprints found')
     results = []
@@ -24,7 +24,7 @@ def verify(path):
         for byte in data:
             value = ((value ^ byte) * 0x100000001b3) & 0xffffffffffffffff
         if len(data) != size or value != expected:
-            raise ValueError('Tracking compatibility failed: ' + name)
+            raise ValueError(label + ' compatibility failed: ' + name)
         results.append(dict(name=name, address=hex(address), size=size, sha256=hashlib.sha256(data).hexdigest()))
     return dict(client=str(path.resolve()), sha256=hashlib.sha256(path.read_bytes()).hexdigest(), sites=results)
 
