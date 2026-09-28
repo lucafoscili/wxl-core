@@ -99,6 +99,8 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     target_link_libraries(WarcraftXL PRIVATE minhook d3d9 shell32)
     target_compile_definitions(WarcraftXL PRIVATE ${WXL_DEFS})
 
+    include("${CMAKE_CURRENT_SOURCE_DIR}/src/client/MinimapTracking/Trial.cmake")
+
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${WXL_CORE_SRC})
 
     # Deploy: copy the freshly linked DLL into the client folder.

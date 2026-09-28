@@ -1,0 +1,11 @@
+# Shared by the core build and Velora's composed Beta runtime preparation.
+option(WXL_HERB_QUESTS_TRIAL "Bounded herbs plus trivial quests native trial" OFF)
+if(WXL_HERB_QUESTS_TRIAL)
+    if(CLIENT_PATH)
+        message(FATAL_ERROR "Tracking trial builds must stay offline; CLIENT_PATH must be empty")
+    endif()
+    target_compile_definitions(WarcraftXL PRIVATE WXL_HERB_QUESTS_TRIAL=1)
+endif()
+add_executable(wxl-herb-quests-test EXCLUDE_FROM_ALL tests/herb_quests_test.cpp)
+target_include_directories(wxl-herb-quests-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_options(wxl-herb-quests-test PRIVATE /UNDEBUG)
