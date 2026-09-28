@@ -1,5 +1,9 @@
 # Focused regression checks
 
+The separate [herbs + trivial quests trial](../docs/herb-quests.md) owns its
+Win32 policy check and read-only exact-client/collector fixtures. Those fixtures
+need supplied client files and are explicit commands, not unittest discovery.
+
 From the repository root, with Python 3 (standard library only):
 
 ```sh
