@@ -10,6 +10,7 @@
 #include "engine/hook/Hook.hpp"
 #include "engine/hook/Registry.hpp"
 #include "game/Glue.hpp"
+#include "game/M2.hpp"
 #include "game/Script.hpp"
 #include "offsets/game/M2.hpp"
 #include "offsets/game/StorySelect.hpp"
@@ -60,33 +61,39 @@ namespace
     bool Same(const Actor& a, const Actor& b)
     { return a.model && a.guid && a.model == b.model && a.guid == b.guid && a.frame == b.frame && a.index == b.index; }
 
-    bool Clip(uintptr_t actor, unsigned id, float& seconds, float& speed)
+    struct ClipSource
     {
-        if (!(Read<uint32_t>(actor + m2::kOffInstInitFlags) & m2::kInstFlagLive)) return false;
-        const auto shared = Read<uintptr_t>(actor + m2::kOffInstShared);
-        if (!shared) return false;
-        const auto header = Read<uintptr_t>(shared + m2::kOffModelHeader);
-        if (!header) return false;
-        const auto count = Read<uint32_t>(header + m2::kOffHdrSeqCount);
-        const auto rows = Read<uintptr_t>(header + m2::kOffHdrSeqPtr);
-        if (!rows || !count || count > 4096) return false;
-        uintptr_t chosen = 0;
-        unsigned matches = 0;
-        for (unsigned i = 0; i < count; ++i)
+        uintptr_t actor, shared = 0, header = 0, rows = 0;
+        bool Live() { return (Read<uint32_t>(actor + m2::kOffInstInitFlags) & m2::kInstFlagLive) != 0; }
+        bool Shared(char* model, size_t capacity)
         {
-            const auto row = rows + i * m2::kSeqStride;
-            if (Read<uint16_t>(row + m2::kOffSeqId) != id) continue;
-            ++matches;
-            if (Read<uint16_t>(row + m2::kOffSeqSubId) == 0) chosen = row;
+            shared = Read<uintptr_t>(actor + m2::kOffInstShared);
+            if (!shared) return false;
+            // Reuse the proven typed path reader and bound it to the inline field.
+            const char* stem = wxl::game::m2::M2Model(reinterpret_cast<void*>(shared)).GetPathStem();
+            const size_t bound = m2::kOffModelHeader - m2::kOffModelPathStem;
+            const auto end = static_cast<const char*>(std::memchr(stem, 0, bound));
+            if (end && end != stem && size_t(end - stem) < capacity)
+                std::memcpy(model, stem, size_t(end - stem) + 1);
+            return true; // Unavailable stem never changes the original admission rule.
         }
-        // The native variation picker must not choose a different duration/speed.
-        if (!chosen || (id != motion::kStand && matches != 1)) return false;
-        // No fallback/alias may silently turn a requested action into idle.
-        if (Read<uint32_t>(chosen + m2::kOffSeqFlags) & 0x40) return false;
-        seconds = Read<uint32_t>(chosen + m2::kOffSeqLength) / 1000.0f;
-        speed = Read<float>(chosen + m2::kOffSeqMovingSpeed);
-        return std::isfinite(seconds) && seconds > 0 && seconds <= 15 && std::isfinite(speed);
-    }
+        bool Header() { header = Read<uintptr_t>(shared + m2::kOffModelHeader); return header != 0; }
+        bool Table(unsigned& count)
+        {
+            count = Read<uint32_t>(header + m2::kOffHdrSeqCount);
+            rows = Read<uintptr_t>(header + m2::kOffHdrSeqPtr);
+            return rows && count && count <= 4096;
+        }
+        uintptr_t Row(unsigned index) { return rows + index * m2::kSeqStride; }
+        unsigned Id(unsigned index) { return Read<uint16_t>(Row(index) + m2::kOffSeqId); }
+        unsigned Variation(unsigned index) { return Read<uint16_t>(Row(index) + m2::kOffSeqSubId); }
+        motion::ClipRecord Record(unsigned index)
+        {
+            const auto row = Row(index);
+            return {Read<uint16_t>(row + m2::kOffSeqSubId), Read<uint32_t>(row + m2::kOffSeqFlags),
+                Read<uint32_t>(row + m2::kOffSeqLength), Read<float>(row + m2::kOffSeqMovingSpeed)};
+        }
+    };
     void Sequence(uintptr_t actor, unsigned clip)
     {
         // Same arguments as native selected-actor initialization, except verified clip ID.
@@ -111,7 +118,7 @@ namespace
             Sequence(old.actor.model, motion::kStand);
         }
     }
-    int Reply(void* lua, bool ok, const char* status, const Actor& actor = {})
+    int Reply(void* lua, bool ok, const char* status, const Actor& actor = {}, const motion::ClipDiagnostic* detail = nullptr)
     {
         char guid[17]{};
         if (actor.guid) std::snprintf(guid, sizeof(guid), "%016llx", static_cast<unsigned long long>(actor.guid));
@@ -120,7 +127,11 @@ namespace
         script::PushString(lua, guid);
         script::PushNumber(lua, g_session.token);
         script::PushNumber(lua, actor.index + 1);
-        return 5;
+        if (!detail) return 5;
+        char encoded[512]{};
+        motion::FormatDiagnostic(*detail, encoded, sizeof(encoded));
+        script::PushString(lua, encoded); // Optional sixth value; the original five positions/statuses stay intact.
+        return 6;
     }
     int __cdecl Probe(void* lua)
     {
@@ -136,11 +147,16 @@ namespace
         if (!std::strcmp(action, "begin"))
         {
             Stop();
-            float stand = 0, unused = 0, salute = 0, speed = 0, walk = 0;
-            if (!Clip(actor.model, motion::kStand, stand, unused) ||
-                !Clip(actor.model, motion::kSalute, salute, unused) ||
-                !Clip(actor.model, motion::kWalk, walk, speed) || speed <= 0 || speed > 8)
-                return Reply(lua, false, "unsupported-clips", actor);
+            ClipSource source{actor.model};
+            motion::ClipDiagnostic detail;
+            if (!motion::AdmitClip(source, motion::kStand, detail))
+                return Reply(lua, false, "unsupported-clips", actor, &detail);
+            if (!motion::AdmitClip(source, motion::kSalute, detail))
+                return Reply(lua, false, "unsupported-clips", actor, &detail);
+            const float salute = detail.record.durationMs / 1000.0f;
+            if (!motion::AdmitClip(source, motion::kWalk, detail) || !motion::AdmitWalkSpeed(detail))
+                return Reply(lua, false, "unsupported-clips", actor, &detail);
+            const float speed = detail.record.speed;
             Session next;
             next.actor = actor; next.salute = salute; next.speed = speed;
             std::memcpy(next.origin, reinterpret_cast<void*>(actor.model + m2::kOffInstPlacement), sizeof(next.origin));
