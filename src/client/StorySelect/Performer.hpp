@@ -9,21 +9,35 @@ namespace wxl::story
 {
     // IDs resolved from the client's AnimationData.dbc, not emote/gameplay IDs.
     constexpr unsigned kStand = 0, kWalk = 4, kSalute = 113;
-    constexpr float kLegSeconds = 0.6f;
-    struct Sample { unsigned clip; float distance; bool returning; bool done; };
-    inline Sample Evaluate(float time, float saluteSeconds, float walkSpeed)
+    struct ProbeRoute { float legDistance, legSeconds; };
+    // AUTHOR-CHOSEN PROBE CHOREOGRAPHY, not measured stride or model movingSpeed.
+    // Preserve G1's original short-route intent: 2.5 * 0.6 = 1.5 local units.
+    constexpr ProbeRoute kG1ProbeRoute{1.5f, 0.6f};
+    inline bool ValidRoute(ProbeRoute route)
     {
+        return std::isfinite(route.legDistance) && route.legDistance > 0 && route.legDistance <= 2 &&
+            std::isfinite(route.legSeconds) && route.legSeconds >= 0.1f && route.legSeconds <= 2;
+    }
+    struct Sample { unsigned clip; float distance; bool returning; bool done; };
+    inline Sample Evaluate(float time, float saluteSeconds, ProbeRoute route)
+    {
+        if (!ValidRoute(route) || !std::isfinite(time) || time < 0 ||
+            !std::isfinite(saluteSeconds) || saluteSeconds <= 0 || saluteSeconds > 15)
+            return {kStand, 0, false, true};
         if (time < saluteSeconds) return {kSalute, 0, false, false};
         const float walk = time - saluteSeconds;
-        if (walk < kLegSeconds) return {kWalk, walk * walkSpeed, false, false};
-        if (walk < 2 * kLegSeconds)
-            return {kWalk, (2 * kLegSeconds - walk) * walkSpeed, true, false};
+        if (walk < route.legSeconds)
+            return {kWalk, route.legDistance * (walk / route.legSeconds), false, false};
+        if (walk < 2 * route.legSeconds)
+            return {kWalk, route.legDistance * ((2 * route.legSeconds - walk) / route.legSeconds), true, false};
         return {kStand, 0, false, true};
     }
     inline bool ValidDelta(double value)
     { return std::isfinite(value) && value >= 0 && value <= 0.5; }
+    inline float ClampedDelta(double value)
+    { return static_cast<float>(std::min(value, 0.05)); } // Only after ValidDelta.
 
-    // Work in the captured actor placement basis; no authored scene coordinates.
+    // Author distance in the captured actor placement basis; preserve native scale.
     // Row-vector matrix, matching the existing M2 placement owner.
     inline void Placement(float out[16], const float origin[16], Sample sample)
     {
@@ -36,7 +50,7 @@ namespace wxl::story
     }
 }
 
-// Existing admission and bounded first-failure evidence; no travel-policy change.
+// Source clip validity and raw metadata; route distance is independently authored.
 namespace wxl::story
 {
     struct ClipRecord
@@ -84,15 +98,6 @@ namespace wxl::story
         { out.gate = "clip-duration"; return false; }
         if (!std::isfinite(out.record.speed)) { out.gate = "clip-speed"; return false; }
         out.gate = "accepted"; return true;
-    }
-    inline bool AdmitWalkSpeed(ClipDiagnostic& out)
-    {
-        if (out.record.speed <= 0 || out.record.speed > 8)
-        {
-            out.gate = out.record.speed == 0 ? "walk-speed-zero" : "walk-speed-range";
-            return false;
-        }
-        return true;
     }
     inline void FormatDiagnostic(const ClipDiagnostic& detail, char* out, size_t capacity)
     {

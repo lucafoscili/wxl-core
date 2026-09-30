@@ -44,7 +44,7 @@ namespace
         Source source; ClipDiagnostic detail;
         assert(AdmitClip(source, kStand, detail) && detail.matches == 2); // Stand variation allowance retained.
         assert(AdmitClip(source, kSalute, detail) && detail.record.durationMs == 2000);
-        assert(AdmitClip(source, kWalk, detail) && AdmitWalkSpeed(detail));
+        assert(AdmitClip(source, kWalk, detail));
         assert(!AdmitClip(source, 99, detail) && !std::strcmp(detail.gate, "clip-missing"));
         assert(detail.matchesRead && detail.matches == 0 && !detail.recordRead);
         source.rows.back().record.variation = 1;
@@ -74,11 +74,14 @@ namespace
             assert(!AdmitClip(source, kWalk, detail) && !std::strcmp(detail.gate, "clip-speed"));
             assert(detail.recordRead && !std::isfinite(detail.record.speed));
         }
-        for (float speed : {0.f, -1.f, 8.01f})
+        // Raw finite metadata does not admit, reject or scale the authored route.
+        for (float speed : {0.f, -1.f, 8.01f, 100.f})
         {
             source.rows.back().record.speed = speed;
-            assert(AdmitClip(source, kWalk, detail) && !AdmitWalkSpeed(detail));
-            assert(!std::strcmp(detail.gate, speed == 0 ? "walk-speed-zero" : "walk-speed-range"));
+            assert(AdmitClip(source, kWalk, detail));
+            assert(!std::strcmp(detail.gate, "accepted") && detail.record.speed == speed);
+            const auto sample = Evaluate(2.3f, 2, kG1ProbeRoute);
+            assert(sample.clip == kWalk && std::abs(sample.distance - 0.75f) < 0.0001f);
             if (speed == 0)
             {
                 char encoded[512]; FormatDiagnostic(detail, encoded, sizeof(encoded));
@@ -86,7 +89,7 @@ namespace
             }
         }
         source.rows.back().record.speed = 8;
-        assert(AdmitClip(source, kWalk, detail) && AdmitWalkSpeed(detail));
+        assert(AdmitClip(source, kWalk, detail));
         // Multiple bad fields must report the same first gate as the original short circuit.
         source.rows.back().record.flags = 0x60;
         source.rows.back().record.durationMs = 0;
@@ -105,9 +108,30 @@ int main()
     using namespace wxl::story;
     assert(!ValidDelta(std::numeric_limits<double>::quiet_NaN()));
     assert(!ValidDelta(-1) && !ValidDelta(10) && ValidDelta(0.016));
-    assert(Evaluate(0, 2, 2.5).clip == kSalute);
-    assert(Evaluate(2.3f, 2, 2.5).clip == kWalk);
-    auto back = Evaluate(2.9f, 2, 2.5);
+    assert(ValidDelta(0.5) && !ValidDelta(0.5001));
+    assert(ClampedDelta(0.5) == 0.05f && ClampedDelta(0.016) == 0.016f);
+    assert(ValidRoute(kG1ProbeRoute));
+    for (ProbeRoute route : {ProbeRoute{0,0.6f}, {-1,0.6f}, {2.01f,0.6f},
+        {1.5f,0}, {1.5f,0.09f}, {1.5f,2.01f},
+        {std::numeric_limits<float>::infinity(),0.6f},
+        {1.5f,std::numeric_limits<float>::quiet_NaN()}})
+    {
+        assert(!ValidRoute(route));
+        const auto refused = Evaluate(2.3f, 2, route);
+        assert(refused.done && refused.clip == kStand && refused.distance == 0);
+    }
+    for (float time : {-1.f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()})
+        assert(Evaluate(time, 2, kG1ProbeRoute).done);
+    assert(Evaluate(0, 0, kG1ProbeRoute).done);
+    assert(Evaluate(0, 15.01f, kG1ProbeRoute).done);
+    assert(Evaluate(0, 2, kG1ProbeRoute).clip == kSalute);
+    assert(Evaluate(2.3f, 2, kG1ProbeRoute).clip == kWalk);
+    for (unsigned step = 0; step <= 400; ++step)
+    {
+        const auto sample = Evaluate(step * 0.01f, 2, kG1ProbeRoute);
+        assert(std::isfinite(sample.distance) && sample.distance >= 0 && sample.distance <= 1.5f);
+    }
+    auto back = Evaluate(2.9f, 2, kG1ProbeRoute);
     assert(back.returning && std::abs(back.distance - 0.75f) < 0.0001f);
     float origin[16] = {0,2,0,0,-2,0,0,0,0,0,2,0,7,8,9,1}, out[16];
     Placement(out, origin, back);
@@ -115,7 +139,7 @@ int main()
     assert(out[1] == -2 && out[4] == 2); // face along return direction, preserve scale
     for (unsigned loop = 0; loop < 50; ++loop)
     {
-        const auto end = Evaluate(20, 2, 2.5);
+        const auto end = Evaluate(20, 2, kG1ProbeRoute);
         assert(end.done && end.clip == kStand);
         Placement(out, origin, end);
         for (unsigned i = 0; i < 16; ++i) assert(out[i] == origin[i]);

@@ -29,7 +29,9 @@ namespace
     {
         Actor actor;
         float origin[16]{};
-        float time = 0, salute = 0, speed = 0;
+        float time = 0, salute = 0;
+        motion::ProbeRoute route = motion::kG1ProbeRoute;
+        motion::ClipRecord walkMetadata; // Keep raw source speed, including zero; never use it for travel.
         unsigned clip = motion::kStand;
         uint32_t token = 0;
     };
@@ -154,11 +156,11 @@ namespace
             if (!motion::AdmitClip(source, motion::kSalute, detail))
                 return Reply(lua, false, "unsupported-clips", actor, &detail);
             const float salute = detail.record.durationMs / 1000.0f;
-            if (!motion::AdmitClip(source, motion::kWalk, detail) || !motion::AdmitWalkSpeed(detail))
+            if (!motion::AdmitClip(source, motion::kWalk, detail))
                 return Reply(lua, false, "unsupported-clips", actor, &detail);
-            const float speed = detail.record.speed;
             Session next;
-            next.actor = actor; next.salute = salute; next.speed = speed;
+            next.actor = actor; next.salute = salute; next.walkMetadata = detail.record;
+            if (!motion::ValidRoute(next.route)) return Reply(lua, false, "invalid-route", actor);
             std::memcpy(next.origin, reinterpret_cast<void*>(actor.model + m2::kOffInstPlacement), sizeof(next.origin));
             for (float value : next.origin) if (!std::isfinite(value)) return Reply(lua, false, "invalid-placement", actor);
             next.clip = motion::kSalute; next.token = ++g_generation;
@@ -172,8 +174,8 @@ namespace
         if (!g_session.token || token != g_session.token) return Reply(lua, false, "stale-generation", actor);
         if (!Same(actor, g_session.actor) || !motion::ValidDelta(delta))
         { Stop(); return Reply(lua, false, "interrupted", actor); }
-        g_session.time += static_cast<float>(std::min(delta, 0.05));
-        const auto sample = motion::Evaluate(g_session.time, g_session.salute, g_session.speed);
+        g_session.time += motion::ClampedDelta(delta);
+        const auto sample = motion::Evaluate(g_session.time, g_session.salute, g_session.route);
         if (sample.done) { Stop(); return Reply(lua, true, "stock", actor); }
         if (sample.clip != g_session.clip) { Sequence(actor.model, sample.clip); g_session.clip = sample.clip; }
         float placed[16]; motion::Placement(placed, g_session.origin, sample); Place(actor.model, placed);

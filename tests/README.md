@@ -1,5 +1,13 @@
 # Focused regression checks
 
+The `wxl-story-select-test` target exercises the shared selector Performer:
+clip admission/first-failure diagnostics, zero Walk metadata, the author-chosen
+G1 route, bounded/clamped travel and exact return in the captured scaled basis.
+`src/client/StorySelect/Performer.hpp` owns that one route (1.5 local units per
+0.6-second leg); it is probe choreography, not measured natural locomotion.
+The test does not execute native animation, selection callbacks or rendering.
+Velora's queued story-select checkpoint owns the native verdict and test batch.
+
 The separate [herbs + trivial quests trial](../docs/herb-quests.md) owns its
 Win32 policy check and read-only exact-client/collector fixtures. Those fixtures
 need supplied client files and are explicit commands, not unittest discovery.
