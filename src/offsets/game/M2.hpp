@@ -1518,6 +1518,12 @@ namespace wxl::offsets::game::m2
     constexpr size_t kOffCharComponentFormat               = 0x14;
     constexpr uint32_t kGxTexFormatArgb8888                = 2; ///< also the composed image's format
     constexpr uint32_t kGxTexFormatDxt1                    = 6; ///< no usable alpha
+    /// What the composition thread does with one request: paints every source the request gathered
+    /// into the request's own image (through the same region painters), compressing it when the
+    /// request's format is kGxTexFormatDxt1. __cdecl: (request).
+    constexpr uintptr_t kCharComposeRequestPaint           = 0x004F0EE0;
+    /// uint32: the request's format, copied from the component's when the request starts.
+    constexpr size_t kOffComposeRequestFormat              = 0x04;
     /// uint32[19]: the chosen geoset id per customization slot, filled by the CCharacterComponent
     /// setters. This array IS the stock client's customization vocabulary; slot 0x11 is substituted
     /// with 1703 when the component's own eye-glow condition holds.

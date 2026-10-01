@@ -38,11 +38,39 @@ namespace
     using CreateBaseTextureFn = void(__fastcall*)(void* component, void* edx);
     /// Binds a component to its model and setup data: __thiscall, 2 stack args, returns success.
     using CharInitFn = bool(__fastcall*)(void* component, void* edx, void* setup, uint32_t flags);
+    /// The section walks: __thiscall, the component in ecx, no stack args.
+    using SectionWalkFn = void(__fastcall*)(void* component, void* edx);
+    /// The composition thread's per-request paint: __cdecl (request).
+    using ComposeRequestFn = void(__cdecl*)(void* request);
 
     PaintRegionFn g_origPaintRegion = nullptr;
     PaintRegionFn g_origPaintFromOrigin = nullptr;
     CreateBaseTextureFn g_origCreateBaseTexture = nullptr;
     CharInitFn g_origCharInit = nullptr;
+    SectionWalkFn g_origPrepSections = nullptr;
+    SectionWalkFn g_origUpdateSections = nullptr;
+    ComposeRequestFn g_origComposeRequest = nullptr;
+
+    /**
+     * Whether the sheet being painted on this thread is a custom body's. The painters are not handed
+     * the component, so the three callers that run them mark it: the section walks from the
+     * component's format, the composition thread from the request's copy of it. An uncompressed
+     * format is only ever set by UncompressCustomBody below, so it identifies a custom body.
+     */
+    thread_local bool t_customSheet = false;
+
+    struct CustomSheetScope
+    {
+        bool previous;
+        explicit CustomSheetScope(uint32_t format) : previous(t_customSheet)
+        { t_customSheet = format == m2::kGxTexFormatArgb8888; }
+        ~CustomSheetScope() { t_customSheet = previous; }
+    };
+
+    uint32_t Field(void* object, size_t offset)
+    {
+        return object ? *reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(object) + offset) : 0;
+    }
 
     /// The component's model path stem, or null while it has no model.
     const char* ModelStem(void* component)
@@ -75,8 +103,9 @@ namespace
     /**
      * @brief The sheet-covering painter, which paints the base skin (and face and scalp) opaque.
      *
-     * A skin authored with alpha is the request for a transparent sheet: after the native paint,
-     * its region keeps the skin's colour (so armour edges blend against it) at alpha zero.
+     * On a custom body's sheet, or from a skin authored with alpha, the skin contributes no
+     * alpha: after the native paint its region keeps the skin's colour (so armour edges blend
+     * against it) at alpha zero, and only armour makes the sheet opaque.
      */
     void __cdecl hkPaintRegion(uint32_t regionIndex, void* source, void** levels)
     {
@@ -84,8 +113,8 @@ namespace
         sa::Rect region;
         if (!source || !levels || !Region(regionIndex, region))
             return;
-        if (*(static_cast<const uint8_t*>(source) + m2::kOffTexEntryAlphaBits) == 0)
-            return;  // Every stock skin: nothing to do.
+        if (!t_customSheet && *(static_cast<const uint8_t*>(source) + m2::kOffTexEntryAlphaBits) == 0)
+            return;  // Every stock character: nothing to do.
         sa::ClearAlpha(levels, SheetResolution(), region);
     }
 
@@ -144,6 +173,24 @@ namespace
         return ok;
     }
 
+    void __fastcall hkPrepSections(void* component, void* edx)
+    {
+        CustomSheetScope scope(Field(component, m2::kOffCharComponentFormat));
+        g_origPrepSections(component, edx);
+    }
+
+    void __fastcall hkUpdateSections(void* component, void* edx)
+    {
+        CustomSheetScope scope(Field(component, m2::kOffCharComponentFormat));
+        g_origUpdateSections(component, edx);
+    }
+
+    void __cdecl hkComposeRequest(void* request)
+    {
+        CustomSheetScope scope(Field(request, m2::kOffComposeRequestFormat));
+        g_origComposeRequest(request);
+    }
+
     /// Before the sheet texture is made, for a component whose model arrived after its init.
     void __fastcall hkCreateBaseTexture(void* component, void* edx)
     {
@@ -164,6 +211,10 @@ namespace
         wxl::hook::Install("CharCreateBaseTexture", m2::kCharCreateBaseTexture,
                            &hkCreateBaseTexture, &g_origCreateBaseTexture);
         wxl::hook::Install("CharInit", m2::kCharInit, &hkCharInit, &g_origCharInit);
+        wxl::hook::Install("CharPrepSections", m2::kCharPrepSections, &hkPrepSections, &g_origPrepSections);
+        wxl::hook::Install("CharUpdateSections", m2::kCharUpdateSections, &hkUpdateSections, &g_origUpdateSections);
+        wxl::hook::Install("CharComposeRequestPaint", m2::kCharComposeRequestPaint,
+                           &hkComposeRequest, &g_origComposeRequest);
         return true;
     }
 }

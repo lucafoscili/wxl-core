@@ -27,7 +27,8 @@
  * as an overlay (a custom body wearing its own full-resolution skin underneath) needs the sheet
  * transparent wherever no armour landed. These helpers keep that alpha:
  *
- *  - a skin authored WITH alpha (stock skins carry none) leaves its region transparent;
+ *  - on a custom body's sheet, or from a skin authored WITH alpha, the skin leaves its
+ *    region transparent;
  *  - an armour paint keeps the alpha of every pixel whose colour it did not change, so only
  *    the pixels it actually painted become opaque.
  *
