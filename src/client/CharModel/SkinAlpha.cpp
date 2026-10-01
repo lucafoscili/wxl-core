@@ -20,9 +20,11 @@
 #include "common/Log.hpp"
 #include "engine/hook/Hook.hpp"
 #include "engine/hook/Registry.hpp"
+#include "game/M2.hpp"
 #include "offsets/game/M2.hpp"
 
 #include <cstdint>
+#include <cstring>
 
 namespace
 {
@@ -32,8 +34,30 @@ namespace
     /// Both region painters: __cdecl (regionIndex, source texture entry, sheet level pointers).
     using PaintRegionFn = void(__cdecl*)(uint32_t regionIndex, void* source, void** levels);
 
+    /// Creates a component's sheet texture: __thiscall, no stack args.
+    using CreateBaseTextureFn = void(__fastcall*)(void* component, void* edx);
+    /// Binds a component to its model and setup data: __thiscall, 2 stack args, returns success.
+    using CharInitFn = bool(__fastcall*)(void* component, void* edx, void* setup, uint32_t flags);
+
     PaintRegionFn g_origPaintRegion = nullptr;
     PaintRegionFn g_origPaintFromOrigin = nullptr;
+    CreateBaseTextureFn g_origCreateBaseTexture = nullptr;
+    CharInitFn g_origCharInit = nullptr;
+
+    /// The component's model path stem, or null while it has no model.
+    const char* ModelStem(void* component)
+    {
+        auto* base = static_cast<uint8_t*>(component);
+        void* instance = *reinterpret_cast<void**>(base + m2::kOffCharComponentInstance);
+        if (!instance)
+            return nullptr;
+        void* shared = *reinterpret_cast<void**>(static_cast<uint8_t*>(instance) + m2::kOffInstShared);
+        if (!shared)
+            return nullptr;
+        const char* stem = wxl::game::m2::M2Model(shared).GetPathStem();
+        const size_t bound = m2::kOffModelHeader - m2::kOffModelPathStem;
+        return stem && std::memchr(stem, 0, bound) ? stem : nullptr;
+    }
 
     uint32_t SheetResolution()
     {
@@ -86,6 +110,47 @@ namespace
             snapshot.Restore();
     }
 
+    /**
+     * @brief Gives a custom body an uncompressed sheet, so the composed alpha reaches the card.
+     *
+     * The stock sheet is DXT1 whenever componentCompress is on, which drops alpha; the component's
+     * format alone decides that (kOffCharComponentFormat). Stock bodies keep it. A threaded
+     * composition request copies the format when it starts, so the switch is made only while none
+     * is in flight: a request already carrying DXT1 data must not feed an ARGB texture.
+     */
+    void UncompressCustomBody(void* component)
+    {
+        if (!component)
+            return;
+        auto* base = static_cast<uint8_t*>(component);
+        auto* format = reinterpret_cast<uint32_t*>(base + m2::kOffCharComponentFormat);
+        if (*format != m2::kGxTexFormatDxt1)
+            return;
+        if (*reinterpret_cast<void**>(base + m2::kOffCharComponentComposeRequest))
+            return;
+        const char* stem = ModelStem(component);
+        if (!sa::IsCustomBody(stem))
+            return;
+        *format = m2::kGxTexFormatArgb8888;
+        WLOG_INFO("skin-alpha: uncompressed sheet for %s", stem);
+    }
+
+    /// As the component attaches to its model: the earliest point its model is known.
+    bool __fastcall hkCharInit(void* component, void* edx, void* setup, uint32_t flags)
+    {
+        const bool ok = g_origCharInit(component, edx, setup, flags);
+        if (ok)
+            UncompressCustomBody(component);
+        return ok;
+    }
+
+    /// Before the sheet texture is made, for a component whose model arrived after its init.
+    void __fastcall hkCreateBaseTexture(void* component, void* edx)
+    {
+        UncompressCustomBody(component);
+        g_origCreateBaseTexture(component, edx);
+    }
+
     bool InstallSkinAlpha()
     {
         if (!wxl::config::Env("WXL_SKIN_ALPHA", true))
@@ -96,6 +161,9 @@ namespace
         wxl::hook::Install("CharPaintRegion", m2::kCharPaintRegion, &hkPaintRegion, &g_origPaintRegion);
         wxl::hook::Install("CharPaintRegionFromOrigin", m2::kCharPaintRegionFromOrigin,
                            &hkPaintFromOrigin, &g_origPaintFromOrigin);
+        wxl::hook::Install("CharCreateBaseTexture", m2::kCharCreateBaseTexture,
+                           &hkCreateBaseTexture, &g_origCreateBaseTexture);
+        wxl::hook::Install("CharInit", m2::kCharInit, &hkCharInit, &g_origCharInit);
         return true;
     }
 }

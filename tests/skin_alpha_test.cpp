@@ -69,6 +69,13 @@ int main()
     sa::ClearAlpha(small.levels.data(), small.edge, sa::Rect{2, 2, 4, 4});
     Check(small.At(0, 3, 3) == 0xFF000000u, "an out-of-bounds region is left alone");
 
+    // Only custom bodies get an uncompressed sheet.
+    Check(!sa::IsCustomBody("Character\\Human\\Female\\HumanFemale"), "a stock race model is stock");
+    Check(!sa::IsCustomBody("CHARACTER\\Velora\\Personal\\umbra\\VeloraStock_x"), "a stock-derived model is stock");
+    Check(sa::IsCustomBody("Creature\\Ayane\\Ayane"), "a donor model is custom");
+    Check(!sa::IsCustomBody(""), "no model is not custom");
+    Check(!sa::IsCustomBody(nullptr), "a missing model is not custom");
+
     if (failures)
         return 1;
     std::printf("skin-alpha: all checks passed\n");

@@ -16,7 +16,9 @@
 
 #pragma once
 
+#include <cctype>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 /**
@@ -34,6 +36,24 @@
  */
 namespace wxl::client::skinalpha
 {
+    /**
+     * @brief Whether a character model is a custom body rather than a stock race model.
+     *
+     * Stock race and stock-derived models live under Character\. A custom body (a donor) is
+     * the only kind that draws the sheet as an overlay on its own skin, so only its sheet needs to
+     * keep alpha; the stock ones keep their compressed sheet.
+     */
+    inline bool IsCustomBody(const char* pathStem)
+    {
+        static constexpr char kStock[] = "character\\";
+        if (!pathStem || !*pathStem)
+            return false;
+        for (size_t i = 0; i + 1 < sizeof(kStock); ++i)
+            if (std::tolower(static_cast<unsigned char>(pathStem[i])) != kStock[i])
+                return true;
+        return false;
+    }
+
     /// One composition region on the sheet at level 0: {x, y, width, height}.
     struct Rect
     {

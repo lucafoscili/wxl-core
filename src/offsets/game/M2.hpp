@@ -1510,6 +1510,14 @@ namespace wxl::offsets::game::m2
     /// one of its SetGeometryVisible calls, so it is the owner of the visibility array and the
     /// receiver any replacement decision has to pass in turn.
     constexpr size_t kOffCharComponentInstance             = 0x38;
+    /// uint32: the component's sheet texture format, copied from the global format when the component
+    /// is set up (kGxTexFormatDxt1 whenever componentCompress is on). Texture creation makes the card
+    /// texture in it and feeds it DXT1 data only for kGxTexFormatDxt1, ARGB otherwise; the section walk
+    /// compresses the composed image only for kGxTexFormatDxt1; a threaded composition request copies
+    /// it. So it alone decides whether the sheet keeps the composed image's alpha.
+    constexpr size_t kOffCharComponentFormat               = 0x14;
+    constexpr uint32_t kGxTexFormatArgb8888                = 2; ///< also the composed image's format
+    constexpr uint32_t kGxTexFormatDxt1                    = 6; ///< no usable alpha
     /// uint32[19]: the chosen geoset id per customization slot, filled by the CCharacterComponent
     /// setters. This array IS the stock client's customization vocabulary; slot 0x11 is substituted
     /// with 1703 when the component's own eye-glow condition holds.
