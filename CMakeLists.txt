@@ -58,6 +58,8 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     # Explicit, client-independent arithmetic check; not deployed or part of normal DLL builds.
     add_executable(wxl-vertex-window-test EXCLUDE_FROM_ALL tests/vertex_window_test.cpp)
     target_include_directories(wxl-vertex-window-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    add_executable(wxl-skin-alpha-test EXCLUDE_FROM_ALL tests/skin_alpha_test.cpp)
+    target_include_directories(wxl-skin-alpha-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
     # --- Automatic, recursive source discovery (no hand-written paths) -----------------------------
     # CONFIGURE_DEPENDS re-globs at build time, so dropping a file (or a whole script) needs no edit here.
