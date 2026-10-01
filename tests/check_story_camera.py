@@ -31,9 +31,14 @@ def native_model_path(f, path):
         f.leaves.clear(); f.leaves.update(leaves)
 
 
-def setup(client, library):
-    f = Fixture(client, library); f.roster()
-    assert f.status('BeginPair', 1) == 'loading'
+def setup(client, library, count=2):
+    f = Fixture(client, library); f.roster(count)
+    if count==2: assert f.status('BeginPair', 1) == 'loading'
+    else:
+        requests=f.MEMORY+0x91000
+        for index in range(count):
+            f.cpu.mem_write(requests+index*32,struct.pack('<I4xQffI4x',index,0x1111+index,index*.4,0,0))
+        assert f.status('BeginPage',requests,count,0)=='loading'
     token = f.call('PairToken'); assert f.step(token) == 'ready'
     shared = f.get(f.BACKGROUND + 0x2C); header = f.get(shared + 0x150)
     f.put(f.BACKGROUND + 0x10, 1)
@@ -121,6 +126,17 @@ def exercise(client, library):
         assert f.call('PairCameraActive') == 0 and not f.camera_events
         assert f.get(0xAC436C) == 0 and f.call('PairToken') == token
     cases.append('stale-token-source-duration-and-camera-refusals-preserve-residents-and-selection')
+    f, token, original, trial, stem = setup(client, library,10)
+    assert f.call('PageCount')==10 and f.status('CameraPair',token,stem,1000)=='camera'
+    for _ in range(20): assert f.step(token,.05)=='ready'
+    assert f.get(f.FRAME+0x2a4)==original and f.call('PageCount')==10
+    assert f.status('CameraPair',token,stem,1000)=='camera'
+    assert f.call('SelectPair',9)==77 and f.get(0xAC436C)==9
+    assert f.get(f.FRAME+0x2a4)==original and f.call('PageCount')==0
+    for index in range(1,10):
+        actor=f.get(f.get(f.ROWS+index*0x198+0x188)+0x38)
+        assert f.get(actor+0x48)==0 and f.get(actor+0x2ac)==0x4e3a20
+    cases.append('ten-resident-camera-expiry-and-active-selection-restore-entire-group-before-native-target')
     return dict(passed=cases, limits='Compiled owning controller and native camera/cache-path instructions; synthetic appearance/readiness/sequence and cache file/allocator/load leaves. No rendering or attachment-motion verdict.')
 
 

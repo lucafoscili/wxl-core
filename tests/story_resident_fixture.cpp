@@ -40,6 +40,24 @@ extern "C" __declspec(dllexport) const char* __cdecl BeginPair(int index)
     g_initialize=wxl::game::Native<InitializeFn>(off::kInitialize);
     return BeginResidents(index);
 }
+extern "C" __declspec(dllexport) const char* __cdecl BeginPage(const ResidentRequest* requests, unsigned count, unsigned revision)
+{
+    g_residentsReady=true;
+    g_initialize=wxl::game::Native<InitializeFn>(off::kInitialize);
+    return BeginGroup(requests,count,revision,true);
+}
+extern "C" __declspec(dllexport) unsigned __cdecl PageCount() { return g_residents.count; }
+extern "C" __declspec(dllexport) unsigned __cdecl PageRevision() { return g_rosterRevision; }
+extern "C" __declspec(dllexport) int __cdecl PageIndex(unsigned member)
+{ return member<g_residents.count ? g_residents.members[member].actor.index : -1; }
+extern "C" __declspec(dllexport) const char* __cdecl ActPage(unsigned token, int index, unsigned action)
+{ return ActResidents(token,index,action); }
+extern "C" __declspec(dllexport) int __cdecl CallResidents(void* lua)
+{
+    g_residentsReady=true;
+    g_initialize=wxl::game::Native<InitializeFn>(off::kInitialize);
+    return ResidentsMethod(lua);
+}
 extern "C" __declspec(dllexport) const char* __cdecl StepPair(unsigned token, float delta)
 { return StepResidents(token,delta); }
 extern "C" __declspec(dllexport) const char* __cdecl ActPair(unsigned token, int index, int salute)

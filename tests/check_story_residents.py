@@ -15,7 +15,7 @@ from unicorn.x86_const import (UC_X86_REG_EAX, UC_X86_REG_EBX, UC_X86_REG_ECX,
     UC_X86_REG_EDX, UC_X86_REG_ESI, UC_X86_REG_EDI, UC_X86_REG_EBP,
     UC_X86_REG_ESP, UC_X86_REG_EIP, UC_X86_REG_EFLAGS, UC_X86_REG_GDTR,
     UC_X86_REG_FS, UC_X86_REG_CS, UC_X86_REG_DS, UC_X86_REG_ES, UC_X86_REG_SS,
-    UC_X86_REG_FPSW, UC_X86_REG_FPTAG)
+    UC_X86_REG_FPSW, UC_X86_REG_FPTAG, UC_X86_REG_FPCW)
 
 
 class Fixture:
@@ -25,6 +25,7 @@ class Fixture:
 
     def __init__(self, client, library):
         self.cpu = Uc(UC_ARCH_X86, UC_MODE_32)
+        self.cpu.reg_write(UC_X86_REG_FPCW,0x037f) # initialized x87; floor must not raise an OS inexact trap
         self.methods, self.leaves, self.events = {}, {}, []
         for path in (client, library):
             pe = pefile.PE(str(path), fast_load=True)
@@ -117,8 +118,8 @@ class Fixture:
             self.cpu.mem_write(sequences+row*0x40,struct.pack('<HHIfI',clip,0,1000,0,0))
         return address
 
-    def roster(self):
-        self.put(0xB6B1FC,self.FRAME); self.put(0xB6B23C,2); self.put(0xB6B240,self.ROWS)
+    def roster(self, count=2):
+        self.put(0xB6B1FC,self.FRAME); self.put(0xB6B23C,count); self.put(0xB6B240,self.ROWS)
         self.put(0xAC436C,0); self.put(0xB6B200,1)
         self.put(0xB6B204,0x3f123456); self.put(0xD38C2C,0x3f654321)
         self.cpu.mem_write(self.PATH,b'Character\\Fixture\\NativeRace.m2\0')
@@ -127,12 +128,13 @@ class Fixture:
         self.put(self.FRAME+0x2a0,self.BACKGROUND)
         self.model(self.BACKGROUND); self.put(self.BACKGROUND+0x10,0)
         self.components={}; self.created=[]; self.equipment=[]; self.requests=[]
-        for index in (0,1):
+        for index in range(count):
             row=self.ROWS+index*0x198
             self.cpu.mem_write(row,struct.pack('<Q',0x1111+index))
             self.cpu.mem_write(row+0x178,bytes([1+index,1,0,4+index,5+index,6+index,7+index,8+index]))
             for slot in range(23): self.put(row+0x50+slot*4,1000*(index+1)+slot)
-        selected=self.MEMORY+0x6000; model=self.model(self.MEMORY+0x18000)
+        selected=self.MEMORY+(0x9000 if count>2 else 0x6000)
+        model=self.model(self.MEMORY+(0x50000 if count>2 else 0x18000))
         self.put(selected+0x38,model); self.put(self.ROWS+0x188,selected)
         self.components[selected]=0
         # The native selector already owns and displays resident 0.

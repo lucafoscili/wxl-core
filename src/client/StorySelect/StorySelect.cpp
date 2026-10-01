@@ -4,6 +4,7 @@
 #include "Performer.hpp"
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include "common/Config.hpp"
 #include "common/Log.hpp"
 #include "common/Mem.hpp"
@@ -262,7 +263,7 @@ namespace
         }
     }
 
-    // Two native cache owners, in the same native background. These records own only
+    // A fixed page of native cache owners, in the same native background. These records own only
     // temporary placement/activity and the extra resident's lighting callback binding.
     // The native row continues to own component/model memory, including cold-row caches.
     using LightingFn = void(__cdecl*)(void*,void*,void*);
@@ -273,10 +274,15 @@ namespace
         uintptr_t lighting[2]{}, userData[2]{};
         unsigned clip = motion::kStand;
         float saluteSeconds = 0, remaining = 0;
+        float staged[2][16]{}, lateral = 0, depth = 0, activityDelay = 0, walkTime = 0;
+        unsigned slot = 0, activity = 0;
+        bool saluteSupported = false, walkSupported = false;
     };
     struct Residents
     {
-        ResidentState members[2];
+        ResidentState members[10];
+        unsigned count = 0;
+        bool page = false;
         uintptr_t rows = 0, background = 0;
         uint32_t revision = 0, token = 0;
         float waiting = 0;
@@ -309,8 +315,12 @@ namespace
     void __cdecl ResidentLighting(void* instance, void* lighting, void* userData)
     {
         const auto& owner = g_residents;
-        const auto& resident = owner.members[1];
-        if (!owner.token || userData != &g_residents.members[1] || !LiveResident(owner,resident.actor)) return;
+        if (!owner.token) return;
+        const ResidentState* found = nullptr;
+        for (unsigned i=1; i<owner.count; ++i)
+            if (userData==&g_residents.members[i]) found=&owner.members[i];
+        if (!found || !LiveResident(owner,found->actor)) return;
+        const auto& resident=*found;
         const unsigned part = reinterpret_cast<uintptr_t>(instance) == resident.actor.model ? 0 : 1;
         if (part && reinterpret_cast<uintptr_t>(instance) != resident.actor.mount) return;
         if (!resident.lighting[part]) return;
@@ -325,7 +335,7 @@ namespace
         g_residents = {}; // invalidate callbacks before restoring native bindings
         if (!old.token) return;
         ++g_generation;
-        for (unsigned member=0; member<2; ++member)
+        for (unsigned member=0; member<old.count; ++member)
         {
             const auto& resident=old.members[member];
             if (!LiveResident(old,resident.actor)) continue;
@@ -335,7 +345,7 @@ namespace
                 const auto model=parts[part];
                 if (!model) continue;
                 if (member && Read<uintptr_t>(model+m2::kOffInstLightingCallbackFn)==reinterpret_cast<uintptr_t>(ResidentLighting) &&
-                    Read<uintptr_t>(model+m2::kOffInstLightingUserData)==reinterpret_cast<uintptr_t>(&g_residents.members[1]))
+                    Read<uintptr_t>(model+m2::kOffInstLightingUserData)==reinterpret_cast<uintptr_t>(&g_residents.members[member]))
                 {
                     *reinterpret_cast<uintptr_t*>(model+m2::kOffInstLightingCallbackFn)=resident.lighting[part];
                     *reinterpret_cast<uintptr_t*>(model+m2::kOffInstLightingUserData)=resident.userData[part];
@@ -349,9 +359,11 @@ namespace
     }
     bool ResidentsValid()
     {
-        return g_residents.token && Same(Selected(),g_residents.members[0].actor) &&
-            LiveResident(g_residents,g_residents.members[0].actor) && LiveResident(g_residents,g_residents.members[1].actor) &&
-            Read<uintptr_t>(g_residents.members[0].actor.frame+off::kBackground)==g_residents.background;
+        if (!g_residents.token || !g_residents.count || !Same(Selected(),g_residents.members[0].actor) ||
+            Read<uintptr_t>(g_residents.members[0].actor.frame+off::kBackground)!=g_residents.background) return false;
+        for (unsigned i=0; i<g_residents.count; ++i)
+            if (!LiveResident(g_residents,g_residents.members[i].actor)) return false;
+        return true;
     }
     const char* BeginCamera(double token, const char* stem, double duration)
     {
@@ -376,31 +388,58 @@ namespace
         wxl::game::Native<void(__fastcall*)(void*,void*,unsigned,unsigned)>(off::kFrameSetSequenceTime)(reinterpret_cast<void*>(frame),nullptr,0,0);
         return "camera";
     }
-    const char* BeginResidents(int index)
+    struct ResidentRequest { int index; uint64_t guid; float lateral, depth; unsigned activity; };
+    const char* BeginGroup(const ResidentRequest* requests, unsigned count, uint32_t revision, bool page)
     {
         Stop(); StopResidents();
-        const Actor selected=Selected(), extra=Resident(index);
+        const Actor selected=Selected();
         if (!g_residentsReady || !g_initialize) return "unavailable";
-        if (!selected.model || !selected.guid || !extra.guid) return "actor-not-ready";
-        if (index==selected.index || selected.guid==extra.guid) return "same-resident";
+        if (!requests || !count || count>10 || revision!=g_rosterRevision) return "invalid-page";
+        if (!selected.model || !selected.guid) return "actor-not-ready";
+        int focus=-1;
+        for (unsigned i=0; i<count; ++i)
+        {
+            const auto& request=requests[i]; const Actor actor=Resident(request.index);
+            if (!actor.guid || actor.guid!=request.guid || !std::isfinite(request.lateral) ||
+                !std::isfinite(request.depth) || std::abs(request.lateral)>6 || std::abs(request.depth)>6 || request.activity>2)
+                return "invalid-page";
+            for (unsigned prior=0; prior<i; ++prior)
+                if (requests[prior].guid==request.guid || requests[prior].index==request.index) return "same-resident";
+            if (actor.index==selected.index) focus=int(i);
+            else if (actor.model && Read<uintptr_t>(actor.model+m2::kOffInstParent)) return "resident-already-attached";
+        }
+        if (focus<0) return "selection-outside-page";
         const auto background=Read<uintptr_t>(selected.frame+off::kBackground);
         if (!background || Read<uintptr_t>(selected.model+m2::kOffInstParent)!=background) return "scene-not-ready";
-        if (extra.model && Read<uintptr_t>(extra.model+m2::kOffInstParent)) return "resident-already-attached";
         const auto rows=Read<uintptr_t>(off::kRows);
-        const auto revision=g_rosterRevision, generation=++g_generation;
-        { RowScope scope(index,true); g_initialize(); } // exact native equipment policy; no selection write
-        const Actor initialized=Resident(index);
-        if (rows!=Read<uintptr_t>(off::kRows) || revision!=g_rosterRevision || generation!=g_generation ||
-            !Same(selected,Selected()) || initialized.guid!=extra.guid || initialized.frame!=extra.frame)
-            return "interrupted";
-        if (!initialized.model) return "initializer-failed";
-        if (initialized.model==selected.model) return "same-model";
+        const auto generation=++g_generation;
         g_residents.rows=rows; g_residents.revision=revision;
         g_residents.background=background; g_residents.token=generation;
-        g_residents.members[0].actor=selected; g_residents.members[1].actor=initialized;
-        for (unsigned member=0; member<2; ++member)
+        g_residents.page=page;
+        // Own each attached model immediately, including partial initialization.
+        // Focus is member 0; authored slots stay in the GUID page's original order.
+        for (unsigned member=0; member<count; ++member)
         {
+            unsigned slot=unsigned(focus);
+            if (member) { slot=member-1; if (slot>=unsigned(focus)) ++slot; }
+            const auto& request=requests[slot];
+            if (member) { RowScope scope(request.index,true); g_initialize(); }
+            const Actor actor=Resident(request.index);
+            if (rows!=Read<uintptr_t>(off::kRows) || revision!=g_rosterRevision || generation!=g_generation ||
+                !Same(selected,Selected()) || actor.guid!=request.guid || actor.frame!=selected.frame)
+            { StopResidents(); return "interrupted"; }
+            if (!actor.model) { StopResidents(); return "initializer-failed"; }
             auto& resident=g_residents.members[member];
+            resident.actor=actor; resident.slot=slot; resident.lateral=request.lateral; resident.depth=request.depth;
+            resident.activity=page ? request.activity : 0; resident.activityDelay=.7f*(slot+1);
+            for (unsigned prior=0; prior<member; ++prior)
+            {
+                const auto& previous=g_residents.members[prior].actor;
+                if (previous.model==actor.model || previous.mount==actor.model ||
+                    (actor.mount && (actor.mount==previous.model || actor.mount==previous.mount)))
+                { StopResidents(); return "same-model"; }
+            }
+            g_residents.count=member+1;
             const uintptr_t parts[] = {resident.actor.model,resident.actor.mount};
             for (unsigned part=0; part<2; ++part)
             {
@@ -420,58 +459,96 @@ namespace
         }
         return "loading";
     }
+    const char* BeginResidents(int index)
+    {
+        const Actor selected=Selected(), extra=Resident(index);
+        const ResidentRequest requests[]={{selected.index,selected.guid,-.75f,0,0},{index,extra.guid,.75f,0,0}};
+        return BeginGroup(requests,2,g_rosterRevision,false);
+    }
     const char* StepResidents(double token, double delta)
     {
         if (!g_residents.token || token!=g_residents.token) return "stale-generation";
         if (!ResidentsValid() || !motion::ValidDelta(delta)) { StopResidents(); return "interrupted"; }
         if (!g_residents.placed)
         {
-            const auto& extra=g_residents.members[1].actor;
             // Stock native per-component compose/geoset path, without shared UI fade or blocking waits.
-            const bool prepared=wxl::game::Native<bool(__fastcall*)(void*,void*,int)>(m2::kCharRenderPrep)(
-                reinterpret_cast<void*>(extra.component),nullptr,0);
-            bool drawable=prepared;
-            for (const auto& resident : g_residents.members)
+            bool drawable=true;
+            for (unsigned i=1; i<g_residents.count; ++i)
+                if (!wxl::game::Native<bool(__fastcall*)(void*,void*,int)>(m2::kCharRenderPrep)(
+                    reinterpret_cast<void*>(g_residents.members[i].actor.component),nullptr,0)) drawable=false;
+            for (unsigned i=0; i<g_residents.count; ++i)
+            {
+                const auto& resident=g_residents.members[i];
                 for (uintptr_t model : {resident.actor.model,resident.actor.mount})
                     if (model && !wxl::game::Native<m2::M2_IsDrawableFn>(m2::kIsDrawable)(reinterpret_cast<void*>(model),nullptr,0,1)) drawable=false;
+            }
             g_residents.waiting+=static_cast<float>(delta);
             if (!drawable)
             {
                 if (g_residents.waiting>15) { StopResidents(); return "loading-timeout"; }
                 return "loading";
             }
-            for (auto& resident : g_residents.members)
+            for (unsigned i=0; i<g_residents.count; ++i)
             {
+                auto& resident=g_residents.members[i];
                 ClipSource source{resident.actor.model}; motion::ClipDiagnostic detail;
-                if (!motion::AdmitClip(source,motion::kStand,detail) || !motion::AdmitClip(source,motion::kSalute,detail))
+                if (!motion::AdmitClip(source,motion::kStand,detail))
                 { StopResidents(); return "unsupported-clips"; }
-                resident.saluteSeconds=detail.record.durationMs/1000.0f;
+                resident.saluteSupported=motion::AdmitClip(source,motion::kSalute,detail);
+                if (!g_residents.page && !resident.saluteSupported) { StopResidents(); return "unsupported-clips"; }
+                resident.saluteSeconds=resident.saluteSupported ? detail.record.durationMs/1000.0f : 1.0f;
+                resident.walkSupported=!resident.actor.mount && motion::AdmitClip(source,motion::kWalk,detail);
             }
             // Author a small side-by-side offset in the captured selected actor's local Y basis.
             // Keep each native model's basis/scale, including any mount, and leave the camera alone.
-            for (unsigned member=0; member<2; ++member)
+            for (unsigned member=0; member<g_residents.count; ++member)
             {
-                const auto& resident=g_residents.members[member];
+                auto& resident=g_residents.members[member];
                 const uintptr_t parts[] = {resident.actor.model,resident.actor.mount};
                 const auto& center=g_residents.members[0].origin[0];
-                const float offset=(member ? 0.5f : -0.5f)*motion::kG1ProbeRoute.legDistance;
+                const float lateral=resident.lateral-(g_residents.page ? g_residents.members[0].lateral : 0);
+                const float depth=resident.depth-(g_residents.page ? g_residents.members[0].depth : 0);
                 for (unsigned part=0; part<2; ++part)
                 {
                     if (!parts[part]) continue;
                     float placed[16]; std::memcpy(placed,resident.origin[part],sizeof(placed));
                     for (unsigned axis=0; axis<3; ++axis)
-                        placed[12+axis]+=center[12+axis]-resident.origin[0][12+axis]+center[4+axis]*offset;
+                        placed[12+axis]+=center[12+axis]-resident.origin[0][12+axis]+center[4+axis]*lateral+center[axis]*depth;
                     Place(parts[part],placed);
+                    std::memcpy(resident.staged[part],placed,sizeof(placed));
                 }
                 Sequence(resident.actor.model,motion::kStand);
             }
             g_residents.placed=true;
         }
-        for (auto& resident : g_residents.members)
+        for (unsigned i=0; i<g_residents.count; ++i)
         {
-            if (resident.clip!=motion::kSalute) continue;
-            resident.remaining-=motion::ClampedDelta(delta);
-            if (resident.remaining<=0) { Sequence(resident.actor.model,motion::kStand); resident.clip=motion::kStand; }
+            auto& resident=g_residents.members[i];
+            const auto elapsed=motion::ClampedDelta(delta);
+            if (resident.clip==motion::kWalk)
+            {
+                resident.walkTime+=elapsed;
+                const auto sample=motion::Evaluate(resident.walkTime+resident.saluteSeconds,resident.saluteSeconds,motion::kG1ProbeRoute);
+                float placed[16]; motion::Placement(placed,resident.staged[0],sample); Place(resident.actor.model,placed);
+                if (sample.done) { Sequence(resident.actor.model,motion::kStand); resident.clip=motion::kStand; }
+            }
+            else if (resident.clip==motion::kSalute)
+            {
+                resident.remaining-=elapsed;
+                if (resident.remaining<=0) { Sequence(resident.actor.model,motion::kStand); resident.clip=motion::kStand; }
+            }
+            else if (g_residents.page && resident.activity)
+            {
+                resident.activityDelay-=elapsed;
+                if (resident.activityDelay<=0)
+                {
+                    resident.activityDelay=4.0f+.4f*resident.slot;
+                    if (resident.activity==1 && resident.saluteSupported)
+                    { resident.clip=motion::kSalute; resident.remaining=resident.saluteSeconds; Sequence(resident.actor.model,resident.clip); }
+                    else if (resident.activity==2 && resident.walkSupported)
+                    { resident.clip=motion::kWalk; resident.walkTime=0; Sequence(resident.actor.model,resident.clip); }
+                }
+            }
         }
         if (g_residents.trialCamera)
         {
@@ -485,18 +562,22 @@ namespace
         }
         return "ready";
     }
-    const char* ActResidents(double token, int index, bool salute)
+    const char* ActResidents(double token, int index, unsigned action)
     {
         if (!g_residents.token || token!=g_residents.token) return "stale-generation";
         if (!ResidentsValid()) { StopResidents(); return "interrupted"; }
         if (!g_residents.placed) return "loading";
-        for (auto& resident : g_residents.members)
+        for (unsigned i=0; i<g_residents.count; ++i)
         {
+            auto& resident=g_residents.members[i];
             if (resident.actor.index!=index) continue;
-            resident.clip=salute ? motion::kSalute : motion::kStand;
-            resident.remaining=salute ? resident.saluteSeconds : 0;
+            if ((action==1 && !resident.saluteSupported) || (action==2 && !resident.walkSupported)) return "unsupported-activity";
+            resident.clip=action==1 ? motion::kSalute : action==2 ? motion::kWalk : motion::kStand;
+            resident.remaining=action==1 ? resident.saluteSeconds : 0; resident.walkTime=0;
+            resident.activityDelay=4.0f+.4f*resident.slot;
+            Place(resident.actor.model,resident.staged[0]);
             Sequence(resident.actor.model,resident.clip);
-            return salute ? "salute" : "stand";
+            return action==1 ? "salute" : action==2 ? "walk" : "stand";
         }
         return "wrong-resident";
     }
@@ -508,6 +589,21 @@ namespace
         {
             if (!std::strcmp(action,"stop")) { StopResidents(); status="stock"; }
             else if (!std::strcmp(action,"step")) status=StepResidents(script::ToNumber(lua,3),script::ToNumber(lua,4));
+            else if (!std::strcmp(action,"page"))
+            {
+                const double revision=script::ToNumber(lua,3), count=script::ToNumber(lua,4);
+                ResidentRequest requests[10]{}; bool valid=std::isfinite(count) && count>=1 && count<=10 && count==std::floor(count) &&
+                    std::isfinite(revision) && revision>=0 && revision<=UINT32_MAX && revision==std::floor(revision);
+                for (unsigned i=0; valid && i<unsigned(count); ++i)
+                {
+                    const unsigned at=5+i*5; const double index=script::ToNumber(lua,at), activity=script::ToNumber(lua,at+4);
+                    const char* guid=script::ToString(lua,at+1);
+                    valid=std::isfinite(index) && index>=1 && index<=50 && index==std::floor(index) && guid && std::strlen(guid)==16 &&
+                        std::strspn(guid,"0123456789abcdefABCDEF")==16 && std::isfinite(activity) && activity>=0 && activity<=2 && activity==std::floor(activity);
+                    if (valid) requests[i]={int(index)-1,std::strtoull(guid,nullptr,16),float(script::ToNumber(lua,at+2)),float(script::ToNumber(lua,at+3)),unsigned(activity)};
+                }
+                status=valid ? BeginGroup(requests,unsigned(count),uint32_t(revision),true) : "invalid-page";
+            }
             else if (!std::strcmp(action,"camera")) status=BeginCamera(script::ToNumber(lua,3),script::ToString(lua,4),script::ToNumber(lua,5));
             else if (!std::strcmp(action,"camera-stop"))
             {
@@ -521,24 +617,35 @@ namespace
                 if (std::isfinite(requested) && requested>=1 && requested<=wxl::offsets::game::capacity::kMaximum && requested==std::floor(requested))
                 {
                     if (!std::strcmp(action,"begin")) status=BeginResidents(int(requested)-1);
-                    else if (!std::strcmp(action,"salute") || !std::strcmp(action,"stand"))
-                        status=ActResidents(script::ToNumber(lua,3),int(requested)-1,!std::strcmp(action,"salute"));
+                    else if (!std::strcmp(action,"salute") || !std::strcmp(action,"stand") || !std::strcmp(action,"walk"))
+                        status=ActResidents(script::ToNumber(lua,3),int(requested)-1,!std::strcmp(action,"salute") ? 1 : !std::strcmp(action,"walk") ? 2 : 0);
                     else status="unknown-action";
                 }
                 else status="wrong-resident";
             }
         }
         const bool ok=!std::strcmp(status,"stock") || !std::strcmp(status,"ready") || !std::strcmp(status,"loading") ||
-            !std::strcmp(status,"salute") || !std::strcmp(status,"stand") || !std::strcmp(status,"camera");
+            !std::strcmp(status,"salute") || !std::strcmp(status,"stand") || !std::strcmp(status,"walk") || !std::strcmp(status,"camera");
         script::PushBoolean(lua,ok); script::PushString(lua,status); script::PushNumber(lua,g_residents.token);
-        for (const auto& resident : g_residents.members)
+        for (unsigned i=0; i<2; ++i)
         {
+            const auto& resident=g_residents.members[i];
             char guid[17]{};
             if (resident.actor.guid) std::snprintf(guid,sizeof(guid),"%016llx",static_cast<unsigned long long>(resident.actor.guid));
             script::PushString(lua,guid); script::PushNumber(lua,resident.actor.index+1);
         }
         script::PushBoolean(lua,g_residents.trialCamera!=0);
-        return 8;
+        script::PushNumber(lua,g_residents.count);
+        char identities[512]{}; size_t used=0;
+        for (unsigned slot=0; slot<g_residents.count; ++slot)
+            for (unsigned i=0; i<g_residents.count; ++i)
+                if (g_residents.members[i].slot==slot)
+                {
+                    const auto& actor=g_residents.members[i].actor;
+                    used+=std::snprintf(identities+used,sizeof(identities)-used,"%016llx@%d;",static_cast<unsigned long long>(actor.guid),actor.index+1);
+                }
+        script::PushString(lua,identities);
+        return 10; // Original eight values retain their positions.
     }
     int Reply(void* lua, bool ok, const char* status, const Actor& actor = {}, const motion::ClipDiagnostic* detail = nullptr)
     {
