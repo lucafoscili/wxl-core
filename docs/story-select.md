@@ -1,5 +1,42 @@
 # Native character roster and optional actor probe
 
+## Attachment contract - 1 October 2026
+
+`game/M2.hpp::AttachToScene(child, parent, slot, force)` passes the child in ECX
+and the parent as the first stack argument. The previous parameter prose reversed
+them; the wrapper's argument order and native address are unchanged. No SDK call
+sites were found in this checkout beyond the wrapper itself and address catalog.
+The native selected-actor initializer also uses child ECX / background parent.
+The optional native relative-position argument is now typed as a pointer; the
+wrapper continues passing null. Native returns with four stack arguments removed.
+
+Attachment takes one child reference. `DetachSlot(parent, slot)` removes every
+matching child and releases those attachment references, preserving a surviving
+row/component owner's reference. A live parent rejects a missing attachment
+lookup unless `force` is explicit; a pending parent has no live lookup yet.
+Reparenting first removes the old attachment. None of this resolves roster
+appearance or admits a raw actor pointer after native roster refresh.
+
+`tests/m2_attachment_fixture.cpp` compiles the real SDK wrappers into a separate
+Win32 test library. `tests/check_m2_attachment.py` replays those calls through the
+supplied client's exact native attach/detach code in isolated Unicorn memory.
+It covers valid/missing/forced slots, pending parents, sibling removal,
+reparenting, reference balance, stack cleanup and callee-saved registers, without
+stubbed native leaves. Models and tables are synthetic: this is native code/ABI
+evidence, not equipped actor, rendering or client acceptance.
+
+From a VS x86 Developer Command Prompt, with an existing output directory:
+
+```bat
+cl /nologo /std:c++17 /O2 /LD /MT /EHsc /I src tests/m2_attachment_fixture.cpp /Fobuild-story-select/m2_attachment_fixture.obj /Febuild-story-select/m2_attachment_fixture.dll /link /NOENTRY
+python -B tests/check_m2_attachment.py --client <Beta-Wow.exe> --fixture build-story-select/m2_attachment_fixture.dll
+```
+
+Python requires `pefile` and `unicorn` on its module path. This fixture library
+has no client entry point and must never be installed or loaded into WoW.
+The Velora owning scene-page checkpoint records the offline test result and
+remaining unselected-row appearance/camera questions.
+
 **28 September Deck crash:** the initial capacity DLL reached Connected then
 faulted at `0x84D9C4` through `GetObjectThis` and the new identity callback.
 `game/Glue.hpp::MethodSelf` incorrectly called the native custom-ABI helper as

@@ -644,10 +644,10 @@ namespace wxl::offsets::game::m2
     // Deprecated spelling: the old name read as get-or-create, which this is not. Kept so no
     // published name disappears.
     constexpr uintptr_t kGetRenderCtx       = kCreateSceneModel;
-    // AttachToScene(renderCtx, subObj, slot): attaches a collection-M2 render context to a scene slot
-    // on the parent CharModelObject render context.
+    // AttachToScene(child, parent, slot): ECX is the child M2 instance; the first stack argument is
+    // the parent M2 instance. Takes an attachment reference on child, not ownership of its CMO.
     constexpr uintptr_t kAttachToScene      = 0x00831630;
-    // DetachSlot(subObj, slot): detaches the M2 bound to a scene slot, releasing its render context.
+    // DetachSlot(parent, slot): removes all matching children and releases each attachment reference.
     constexpr uintptr_t kDetachSlot         = 0x00827560;
     // ReleaseRenderCtx(renderCtx): releases a render context obtained from GetRenderCtx. thiscall,
     // no stack args (ECX only): decrements a refcount at renderCtx+0 and tears the model down once it
@@ -1429,10 +1429,11 @@ namespace wxl::offsets::game::m2
     using M2_CreateSceneModelFn = void*(__fastcall*)(void* scene, void* edx, void* path, uint32_t zero);
     // Deprecated spelling, kept so no published name disappears.
     using M2_GetRenderCtxFn     = M2_CreateSceneModelFn;
-    // AttachToScene(renderCtx, edx, subObj, slot, 0, 0): ret 16 (4 stack args: subObj, slot, 0, 0).
-    using M2_AttachToSceneFn    = void (__fastcall*)(void* renderCtx, void* edx, void* subObj, uint32_t slot, uint32_t zero1, uint32_t zero2);
-    // DetachSlot(subObj, edx, slot): detaches the M2 from a scene slot, releasing its render ctx.
-    using M2_DetachSlotFn       = void (__fastcall*)(void* subObj, void* edx, uint32_t slot);
+    // AttachToScene(child, edx, parent, slot, relativePosition, forceAttach): ret 16. SDK passes null
+    // relativePosition; forceAttach bypasses a missing attachment index on an already-live parent.
+    using M2_AttachToSceneFn    = void (__fastcall*)(void* child, void* edx, void* parent, uint32_t slot, const void* relativePosition, uint32_t forceAttach);
+    // DetachSlot(parent, edx, slot): removes all matching children; releases attachment references.
+    using M2_DetachSlotFn       = void (__fastcall*)(void* parent, void* edx, uint32_t slot);
     // ReleaseRenderCtx(renderCtx, edx): releases a render context.
     using M2_ReleaseRenderCtxFn = void (__fastcall*)(void* renderCtx, void* edx);
     // BindTexSlot(renderCtx, edx, key, modelPtr): ret 8 (key=2, then modelPtr on stack).

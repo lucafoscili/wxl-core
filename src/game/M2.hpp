@@ -221,27 +221,27 @@ namespace wxl::game::m2
     }
 
     /**
-     * @brief Attaches a collection-M2 render context to a scene slot on the parent render context.
-     * @param renderCtx   the parent render context (from GetRenderCtx).
-     * @param subObj      the collection-M2 instance to attach.
+     * @brief Attaches a child model instance to a slot on a parent model instance.
+     * @param child       the instance to attach (native ECX).
+     * @param parent      the instance that owns the slot (first stack argument).
      * @param slot        the scene slot index to attach to.
      * @param forceAttach when true, bypasses the attachment-point lookup check that otherwise silently
      *                    exits for attachment points not present in the character's table (e.g. point 19
      *                    used by collection M2s).
      */
-    inline void AttachToScene(void* renderCtx, void* subObj, uint32_t slot, bool forceAttach = false)
+    inline void AttachToScene(void* child, void* parent, uint32_t slot, bool forceAttach = false)
     {
-        Native<off::M2_AttachToSceneFn>(off::kAttachToScene)(renderCtx, nullptr, subObj, slot, 0, forceAttach ? 1u : 0u);
+        Native<off::M2_AttachToSceneFn>(off::kAttachToScene)(child, nullptr, parent, slot, 0, forceAttach ? 1u : 0u);
     }
 
     /**
-     * @brief Detaches the M2 bound to a scene slot, releasing its render context.
-     * @param subObj  the collection-M2 instance that owns the slot.
+     * @brief Detaches every child bound to a parent's slot, releasing each attachment reference.
+     * @param parent  the model instance that owns the slot.
      * @param slot    the scene slot index to detach.
      */
-    inline void DetachSlot(void* subObj, uint32_t slot)
+    inline void DetachSlot(void* parent, uint32_t slot)
     {
-        Native<off::M2_DetachSlotFn>(off::kDetachSlot)(subObj, nullptr, slot);
+        Native<off::M2_DetachSlotFn>(off::kDetachSlot)(parent, nullptr, slot);
     }
 
     /**
