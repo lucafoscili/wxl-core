@@ -4,6 +4,31 @@ import json
 from pathlib import Path
 import struct
 from check_story_residents import Fixture
+from unicorn.x86_const import UC_X86_REG_ECX, UC_X86_REG_ESP, UC_X86_REG_EIP
+
+MODEL_PATH = b'Interface\\Glues\\Models\\UI_Human\\UI_Human.m2'
+
+
+def native_model_path(f, path):
+    """Original cache path normalization/copy; file/allocator/load leaves only."""
+    cache, input_path, shared = (f.MEMORY + offset for offset in (0x9a000, 0x9d000, 0x9f000))
+    f.cpu.mem_write(input_path, path + b'\0')
+    leaves = dict(f.leaves)
+    f.leaves[0x4bb3e0] = lambda: f.ret(1)  # model bounds query
+    def opened(): f.put(f.arg(4), 1); f.ret(1, 16)
+    f.leaves[0x424b50] = opened
+    f.leaves[0x76e540] = lambda: f.ret(shared, 16)
+    f.leaves[0x83c5f0] = lambda: f.ret(shared, 4)
+    f.leaves[0x83d410] = lambda: f.ret(1, 12)
+    try:
+        sp = f.STACK + 0xf000
+        for offset, value in ((0, f.STOP), (4, input_path), (8, 0)): f.put(sp + offset, value)
+        f.cpu.reg_write(UC_X86_REG_ESP, sp); f.cpu.reg_write(UC_X86_REG_ECX, cache)
+        f.cpu.emu_start(0x81c390, 0x81c64c, count=100000)
+        assert f.cpu.reg_read(UC_X86_REG_EIP) == 0x81c64c
+        return bytes(f.cpu.mem_read(shared + 0x3c, 276)).split(b'\0', 1)[0]
+    finally:
+        f.leaves.clear(); f.leaves.update(leaves)
 
 
 def setup(client, library):
@@ -12,13 +37,17 @@ def setup(client, library):
     token = f.call('PairToken'); assert f.step(token) == 'ready'
     shared = f.get(f.BACKGROUND + 0x2C); header = f.get(shared + 0x150)
     f.put(f.BACKGROUND + 0x10, 1)
-    f.cpu.mem_write(shared + 0x3C, b'Interface\\Glues\\Models\\UI_Human\\UI_Human\0')
-    f.put(f.get(header + 0x20) + 4, 1067); f.put(header + 0x110, 2)
+    loaded_path = native_model_path(f, MODEL_PATH)
+    assert loaded_path == MODEL_PATH.lower()  # .m2 is retained, not a stem.
+    f.cpu.mem_write(shared + 0x3C, loaded_path + b'\0')
+    f.put(header + 0x1C, 1)
+    f.cpu.mem_write(f.get(header + 0x20), struct.pack('<HHIfI', 0, 0, 1067, 0, 0x20))
+    f.put(header + 0x110, 2)
     table, original, trial, stem = (f.MEMORY + offset for offset in (0x92000, 0x93000, 0x94000, 0x95000))
     f.put(f.BACKGROUND + 0x2B4, table)
     f.put(table + 0x34, original); f.put(table + 56 + 0x34, trial)
     f.put(original + 4, 2); f.put(trial + 4, 1); f.put(f.FRAME + 0x2A4, original)
-    f.cpu.mem_write(stem, b'Interface\\Glues\\Models\\UI_Human\\UI_Human\0')
+    f.cpu.mem_write(stem, MODEL_PATH + b'\0')
     f.leaves[0x824F00] = lambda: f.ret(1, 8)
     f.camera_events = []
     def sequence():
@@ -30,6 +59,15 @@ def setup(client, library):
 
 def exercise(client, library):
     cases = []
+    f, token, original, trial, stem = setup(client, library)
+    f.cpu.mem_write(stem, MODEL_PATH.rsplit(b'.', 1)[0] + b'\0')
+    assert f.status('CameraPair', token, stem, 1000) == 'camera-unavailable'
+    assert f.call('PairCameraActive') == 0 and not f.camera_events
+    assert f.call('PairToken') == token and f.get(f.FRAME + 0x2A4) == original
+    f.cpu.mem_write(stem, MODEL_PATH + b'\0')
+    assert f.status('CameraPair', token, stem, 1000) == 'camera'
+    f.call('StopCameraPair')
+    cases.append('native-cache-keeps-m2-extension-stem-only-refuses-full-path-starts')
     f, token, original, trial, stem = setup(client, library)
     actor = f.selected_model
     assert f.status('CameraPair', token, stem, 1000) == 'camera'
@@ -83,7 +121,7 @@ def exercise(client, library):
         assert f.call('PairCameraActive') == 0 and not f.camera_events
         assert f.get(0xAC436C) == 0 and f.call('PairToken') == token
     cases.append('stale-token-source-duration-and-camera-refusals-preserve-residents-and-selection')
-    return dict(passed=cases, limits='Compiled owning controller and native camera helpers; synthetic appearance/readiness/sequence leaves. No rendering or attachment-motion verdict.')
+    return dict(passed=cases, limits='Compiled owning controller and native camera/cache-path instructions; synthetic appearance/readiness/sequence and cache file/allocator/load leaves. No rendering or attachment-motion verdict.')
 
 
 if __name__ == '__main__':
