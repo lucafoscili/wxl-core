@@ -1,4 +1,5 @@
 // Client-independent check of the skin-alpha sheet arithmetic; not deployed or part of the DLL.
+#include "client/CharModel/DonorHair.hpp"
 #include "client/CharModel/SkinAlpha.hpp"
 
 #include <cstdio>
@@ -104,6 +105,16 @@ int main()
         auto opaque = [&]() { for (uint32_t x = 4; x < 8; ++x) full.At(0, x, 0) = 0xFF000000u | armour; };
         solid.OverBlack(); opaque(); solid.OverWhite(); opaque(); solid.Finish();
         Check(full.At(0, 5, 0) == (0xFF000000u | armour), "solid armour is solid and its own colour");
+    }
+
+    // Donor hair: a helm's race mask decides, and every vertex-window level is covered.
+    {
+        namespace dh = wxl::client::donorhair;
+        Check(dh::HidesHair(1u << 1, 1), "a helm hiding human hair hides it for a human");
+        Check(!dh::HidesHair(1u << 4, 1), "a helm hiding only night elf hair leaves a human's");
+        Check(!dh::HidesHair(0xFFFFFFFFu, 40), "an out-of-range race is never hidden");
+        Check(dh::VolumeId(0) == 2001 && dh::VolumeId(1) == 65536 + 2001, "the volume id per level");
+        Check(dh::kHairVolumeGeoset > 2000, "the volume sits above the client's blanket-hidden range");
     }
 
     // Only custom bodies get an uncompressed sheet.

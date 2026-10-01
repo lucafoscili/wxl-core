@@ -149,6 +149,24 @@ namespace wxl::offsets::game::db2
         constexpr size_t kOffIcon2      = 0x18; // char* icon2 string (consumer-defined convention; raw pointer only)
         constexpr size_t kOffParticleId = 0x60; // uint32 particle color id
         constexpr size_t kRecordSize    = 256;  // byte stride between records in the storage array
+        /// uint32[2]: the HelmetGeosetVisData row a helm applies, per wearer sex (0 male, 1 female).
+        constexpr size_t kOffHelmetGeosetVis = 0x34;
+    }
+
+    // -------------------------------------------------------------------------
+    // HelmetGeosetVisData DBC: what a helm hides on its wearer. Compacted storage indexed by
+    // (id - minId). Each field after the id is a RACE BITMASK (bit = race id): the helm hides that
+    // part for every race whose bit is set. The client's head-item path (0x004EF0D0) reads the row
+    // named by the helm's ItemDisplayInfo for the wearer's sex and, for a set bit, chooses the
+    // "nothing" geoset of that customization slot: hair 1, facial hair 101/201/301, ears 701,
+    // 1601 and eyes 1701.
+    // -------------------------------------------------------------------------
+    namespace helmetgeosetvisdata
+    {
+        constexpr uintptr_t kMaxId     = 0x00AD3CC8;
+        constexpr uintptr_t kMinId     = 0x00AD3CCC;
+        constexpr uintptr_t kIdTable   = 0x00AD3CDC; // record* table, indexed by (id - minId)
+        constexpr size_t    kOffHair   = 0x04;       // uint32 race bitmask: hide hair
     }
 
     // -------------------------------------------------------------------------

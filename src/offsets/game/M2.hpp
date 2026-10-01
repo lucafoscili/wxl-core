@@ -1750,6 +1750,11 @@ namespace wxl::offsets::game::m2
     /// Component fields the load above writes.
     constexpr size_t kOffCharComponentRace    = 0x18;
     constexpr size_t kOffCharComponentSex     = 0x1C;
+    /// uint32[12]: the display id of each equipped model slot, written by the slot handler
+    /// (0x004F2640) from the first dword of the item data it is given. Slot 0 is the head, whose
+    /// handler applies the helm's HelmetGeosetVisData (db2::helmetgeosetvisdata).
+    constexpr size_t kOffCharComponentSlotDisplays = 0x428;
+    constexpr uint32_t kCharModelSlotHead          = 0;
     /// Bitmask, one bit per region: the regions the composition still owes a repaint. The section
     /// walk tests it region by region and reaches a region's painter ONLY for a set bit, so a region
     /// whose bit is clear is not painted at all, whatever sources it holds. The walk's caller clears

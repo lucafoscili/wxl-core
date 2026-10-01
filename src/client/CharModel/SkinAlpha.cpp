@@ -15,6 +15,7 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 #include "config.hpp"
+#include "client/CharModel/CustomBody.hpp"
 #include "client/CharModel/SkinAlpha.hpp"
 #include "common/Config.hpp"
 #include "common/Log.hpp"
@@ -72,20 +73,7 @@ namespace
         return object ? *reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(object) + offset) : 0;
     }
 
-    /// The component's model path stem, or null while it has no model.
-    const char* ModelStem(void* component)
-    {
-        auto* base = static_cast<uint8_t*>(component);
-        void* instance = *reinterpret_cast<void**>(base + m2::kOffCharComponentInstance);
-        if (!instance)
-            return nullptr;
-        void* shared = *reinterpret_cast<void**>(static_cast<uint8_t*>(instance) + m2::kOffInstShared);
-        if (!shared)
-            return nullptr;
-        const char* stem = wxl::game::m2::M2Model(shared).GetPathStem();
-        const size_t bound = m2::kOffModelHeader - m2::kOffModelPathStem;
-        return stem && std::memchr(stem, 0, bound) ? stem : nullptr;
-    }
+    using wxl::client::custombody::ModelStem;
 
     uint32_t SheetResolution()
     {
