@@ -8,6 +8,26 @@ G1 route, bounded/clamped travel and exact return in the captured scaled basis.
 The test does not execute native animation, selection callbacks or rendering.
 Velora's queued story-select checkpoint owns the native verdict and test batch.
 
+The opt-in two-resident experiment remains in `src/client/StorySelect/StorySelect.cpp`.
+`WXL_STORY_RESIDENTS=0` disables its bridge without disabling G1 or capacity.
+`tests/story_resident_fixture.cpp` compiles that owner into an emulator-only DLL;
+`tests/check_story_residents.py` runs its row redirects and owner against supplied
+12340 code. Native equipment/attachment/lighting-prefix code executes, while
+model allocation, DBC/composition/render readiness and sequence leaves are
+synthetic. This is not rendered equipment or native visual acceptance.
+
+In an x86 Visual Studio developer shell, with pefile and Unicorn on Python's path:
+
+```powershell
+cl /nologo /std:c++17 /O2 /Oi /Gy /GS- /LD /MT /EHs-c- /I src tests/story_resident_fixture.cpp /Fo<offline-output>/fixture.obj /Fe<offline-output>/fixture.dll /link /NOENTRY /OPT:REF libucrt.lib
+python -B tests/check_story_residents.py --client <12340-Wow.exe> --fixture <offline-output>/fixture.dll --output <offline-output>/check.json
+```
+
+The fixture omits CRT startup, security cookies and exception unwinding solely
+to execute the selected exports in Unicorn. Production build flags remain intact.
+Never load/install this fixture DLL into a client. A prepared composed runtime
+and the owning Velora checkpoint are the route to a reviewed native candidate.
+
 The separate [herbs + trivial quests trial](../docs/herb-quests.md) owns its
 Win32 policy check and read-only exact-client/collector fixtures. Those fixtures
 need supplied client files and are explicit commands, not unittest discovery.

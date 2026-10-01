@@ -97,11 +97,24 @@ class Fixture:
         assert self.cpu.reg_read(UC_X86_REG_ESP)==sp+4
         return self.cpu.reg_read(UC_X86_REG_EAX)
 
+    def status(self,method,*args):
+        address=self.call(method,*args)
+        return bytes(self.cpu.mem_read(address,64)).split(b'\0',1)[0].decode()
+
+    def step(self,token,delta=.016):
+        return self.status('StepPair',token,struct.unpack('<I',struct.pack('<f',delta))[0])
+
     def model(self,address):
         self.cpu.mem_write(address,b'\0'*0x400)
         self.put(address,1); self.put(address+0x10,0x203)
         matrix=[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]
         self.cpu.mem_write(address+0xb4,struct.pack('<16f',*matrix))
+        shared=address+0x50000; header=shared+0x200; sequences=header+0x100
+        self.put(address+0x2c,shared); self.put(shared+0x150,header)
+        self.cpu.mem_write(shared+0x3c,b'Character\\Fixture\\NativeRace\0')
+        self.put(header+0x1c,2); self.put(header+0x20,sequences)
+        for row,clip in enumerate((0,113)):
+            self.cpu.mem_write(sequences+row*0x40,struct.pack('<HHIfI',clip,0,1000,0,0))
         return address
 
     def roster(self):
@@ -127,11 +140,13 @@ class Fixture:
         self.put(model+0x5c,self.BACKGROUND+0x58); self.put(model,2)
         self.put(self.BACKGROUND+0x58,model)
         self.selected_model=model
+        self.put(model+0x2ac,0x4e3a20); self.put(model+0x2b0,self.FRAME+0x6e8)
+        self.drawable=True; self.prepared=True; self.sequences=[]; self.lights=[]
         self.leaves.update({
             0x4DFDA0:self.request_default, 0x6DC810:self.race_model,
             0x4F0980:self.allocate, 0x95F650:lambda:self.ret(self.SCENE),
             0x81F8F0:self.create_model, 0x4F24D0:self.init_component,
-            0x832AB0:lambda:self.ret(1,28), 0x8B7DA0:self.item_default,
+            0x832AB0:self.sequence, 0x8B7DA0:self.item_default,
             0x4CFD90:self.item_data, 0x65C290:lambda:self.ret(0,4),
             0x4F2880:self.equip, 0x4EACD0:self.weapon,
             0x4F2640:self.special, 0x5EEB70:lambda:self.ret(),
@@ -139,7 +154,26 @@ class Fixture:
             0x4E2E70:lambda:self.side_effect('facing'),
             0x4E6AE0:lambda:self.side_effect('fade'),
             0x4E2CE0:lambda:self.ret(),
+            0x4F1520:self.prepare, 0x824FC0:self.draw,
+            0x4E3A6E:self.lighting_prefix,
         })
+    def sequence(self):
+        self.sequences.append((self.this(),self.arg(2))); self.ret(1,28)
+    def prepare(self):
+        assert self.arg(1)==0
+        self.events.append(('prepare',self.this())); self.ret(int(self.prepared),4)
+    def draw(self):
+        assert (self.arg(1),self.arg(2))==(0,1)
+        self.ret(int(self.drawable),8)
+    def lighting_prefix(self):
+        # Actual native row lookup and ghost-bit test executed. The rest of the
+        # native lighting math is outside this row/lifetime fixture.
+        self.lights.append((self.cpu.reg_read(UC_X86_REG_EAX),bool(self.cpu.reg_read(UC_X86_REG_EFLAGS)&0x40)))
+        bp=self.cpu.reg_read(UC_X86_REG_EBP)
+        self.cpu.reg_write(UC_X86_REG_ESI,self.get(bp-0x90))
+        self.cpu.reg_write(UC_X86_REG_EDI,self.get(bp-0x94))
+        self.cpu.reg_write(UC_X86_REG_ESP,bp+4)
+        self.cpu.reg_write(UC_X86_REG_EBP,self.get(bp)); self.ret()
     def request_default(self):
         self.cpu.mem_write(self.this(),b'\0'*0x178); self.ret()
     def race_model(self):
@@ -244,7 +278,117 @@ def exercise(client,library):
     site,size=f.redirects[28]; f.cpu.emu_start(site,site+size,count=1000)
     assert f.cpu.reg_read(UC_X86_REG_EAX)==7
     passed.append('initializer-early-failure-unwinds-row-context-without-changing-selection')
-    return dict(status='offline-scoped-native-initializer-passed',cases=passed,
+
+    f=Fixture(client,library); f.roster()
+    origin=bytes(f.cpu.mem_read(f.selected_model+0xb4,64))
+    assert f.status('BeginPair',1)=='loading'
+    token=f.call('PairToken'); assert token
+    component=f.get(f.ROWS+0x198+0x188); root=f.get(component+0x38)
+    native_lighting=f.get(root+0x2ac); assert native_lighting!=0x4e3a20
+    f.put(f.ROWS+0x198+0x170,0x2000)
+    f.call('LightPair',root); f.call('LightPair',f.selected_model)
+    assert f.lights==[(f.ROWS+0x198,False),(f.ROWS,True)]
+    assert f.get(0xAC436C)==0
+    f.drawable=False; assert f.step(token)=='loading'
+    assert bytes(f.cpu.mem_read(f.selected_model+0xb4,64))==origin
+    f.drawable=True; assert f.step(token)=='ready'
+    assert struct.unpack('<16f',f.cpu.mem_read(f.selected_model+0xb4,64))[13]==-.75
+    assert struct.unpack('<16f',f.cpu.mem_read(root+0xb4,64))[13]==.75
+    f.sequences.clear()
+    assert f.status('ActPair',token,1,1)=='salute'
+    assert f.sequences==[(root,113)]
+    assert f.status('ActPair',token,0,1)=='salute'
+    assert f.sequences[-1]==(f.selected_model,113)
+    assert f.status('ActPair',token,1,0)=='stand'
+    assert f.sequences[-1]==(root,0)
+    assert f.status('ActPair',token,2,1)=='wrong-resident'
+    for _ in range(25): assert f.step(token,.05)=='ready'
+    assert f.sequences[-1]==(f.selected_model,0)
+    f.call('StopPair')
+    assert f.call('PairToken')==0 and f.get(0xAC436C)==0
+    assert bytes(f.cpu.mem_read(f.selected_model+0xb4,64))==origin
+    assert f.get(root+0x48)==0 and f.get(root)==1 and f.get(component+0x38)==root
+    assert f.get(root+0x2ac)==0x4e3a20 and f.get(root+0x2b0)==f.FRAME+0x6e8
+    assert f.get(f.BACKGROUND+0x58)==f.selected_model
+    assert f.status('BeginPair',1)=='loading'; next_token=f.call('PairToken'); assert next_token!=token
+    assert f.step(token)=='stale-generation' and f.call('PairToken')==next_token
+    assert f.step(next_token)=='ready'
+    assert len(f.created)==1
+    f.call('RefreshPair')
+    assert f.call('PairToken')==0 and f.get(root+0x48)==0
+    assert f.step(next_token)=='stale-generation'
+    passed.append('cold-pair-lighting-independent-activities-stop-cached-restart-refresh-and-stale-generation')
+
+    for failure in ('clip','timeout','native-failure','generation','rows'):
+        f=Fixture(client,library); f.roster()
+        origin=bytes(f.cpu.mem_read(f.selected_model+0xb4,64))
+        if failure=='native-failure':
+            f.cpu.mem_write(f.ROWS+0x198+0x178,b'\xff')
+            assert f.status('BeginPair',1)=='initializer-failed'
+            assert f.call('PairToken')==0 and f.get(0xAC436C)==0
+            continue
+        assert f.status('BeginPair',1)=='loading'; token=f.call('PairToken')
+        component=f.get(f.ROWS+0x198+0x188); root=f.get(component+0x38)
+        if failure=='clip':
+            shared=f.get(root+0x2c); header=f.get(shared+0x150); f.put(header+0x1c,1)
+            assert f.step(token)=='unsupported-clips'
+        elif failure=='timeout':
+            f.prepared=False
+            for _ in range(30): assert f.step(token,.5)=='loading'
+            assert f.step(token,.5)=='loading-timeout'
+        elif failure=='generation':
+            f.put(0xAC436C,1); assert f.step(token)=='interrupted'
+        else:
+            f.put(0xB6B240,0)
+            # Freed rows/models are inaccessible. No captured model may be read.
+            f.cpu.mem_unmap(f.MEMORY,0x100000)
+            assert f.step(token)=='interrupted'
+            assert f.call('PairToken')==0
+            continue
+        assert f.call('PairToken')==0 and f.get(root+0x48)==0
+        assert bytes(f.cpu.mem_read(f.selected_model+0xb4,64))==origin
+        assert f.get(root+0x2ac)==0x4e3a20 and f.get(root)==1
+    passed.append('missing-clip-timeout-native-failure-selection-and-freed-roster-invalidation')
+
+    f=Fixture(client,library); f.roster()
+    f.cpu.mem_write(f.ROWS+0x198+0x179,b'\x03') # native DK weapon routing
+    f.call('InitializeRow',1)
+    assert {display for _,_,_,display in f.equipment}==set(range(2000,2023))-{2015,2016}
+    root=f.get(f.get(f.ROWS+0x198+0x188)+0x38)
+    f.call('AttachFixture',root,f.BACKGROUND,0) # remains attached; reject instead of stealing it
+    assert f.status('BeginPair',1)=='resident-already-attached'
+    # Drop the prior test attachment via the real detach entry, then exercise native cached mounts.
+    f.methods['DetachFixture']=0x8274f0
+    f.cpu.reg_write(UC_X86_REG_ECX,root); f.call('DetachFixture')
+    mounts=(f.model(f.MEMORY+0x22000),f.model(f.MEMORY+0x23000))
+    for index,mount in enumerate(mounts):
+        f.put(f.ROWS+index*0x198+0x18c,mount)
+        f.put(mount+0x2ac,0x4e3a20); f.put(mount+0x2b0,f.FRAME+0xa68)
+    f.call('AttachFixture',mounts[0],f.BACKGROUND,1)
+    origin=[bytes(f.cpu.mem_read(model+0xb4,64)) for model in (f.selected_model,*mounts,root)]
+    assert f.status('BeginPair',1)=='loading'; token=f.call('PairToken')
+    f.call('LightPair',mounts[1]); assert f.lights[-1][0]==f.ROWS+0x198
+    assert f.step(token)=='ready'
+    for mount,offset in zip(mounts,(-.75,.75)):
+        assert struct.unpack('<16f',f.cpu.mem_read(mount+0xb4,64))[13]==offset
+    f.call('StopPair')
+    assert origin==[bytes(f.cpu.mem_read(model+0xb4,64)) for model in (f.selected_model,*mounts,root)]
+    assert f.get(mounts[1]+0x48)==0 and f.get(mounts[0]+0x48)==f.BACKGROUND
+    assert f.get(mounts[1]+0x2ac)==0x4e3a20 and f.get(mounts[1]+0x2b0)==f.FRAME+0xa68
+    passed.append('native-dk-equipment-policy-and-mounted-pair-placement-lighting-and-teardown')
+    for operation in ('select','native-initialize'):
+        f=Fixture(client,library); f.roster()
+        assert f.status('BeginPair',1)=='loading'; token=f.call('PairToken')
+        assert f.step(token)=='ready'
+        root=f.get(f.get(f.ROWS+0x198+0x188)+0x38)
+        if operation=='select':
+            assert f.call('SelectPair',1)==77 and f.get(0xAC436C)==1
+        else:
+            f.call('InitializeNormal'); assert f.get(0xAC436C)==0
+        assert f.call('PairToken')==0 and f.get(root+0x48)==0
+        assert f.get(root+0x2ac)==0x4e3a20
+    passed.append('owning-selection-and-native-initializer-hooks-restore-before-forwarding')
+    return dict(status='offline-two-resident-fixtures-passed',cases=passed,
                 limits='Synthetic engine model/DBC/composition leaves; no rendered/equipped/native-client acceptance.')
 
 

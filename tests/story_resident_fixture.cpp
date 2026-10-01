@@ -34,3 +34,31 @@ extern "C" __declspec(dllexport) void __cdecl InitializeNormal()
     g_initialize=wxl::game::Native<InitializeFn>(off::kInitialize);
     InitializeSelected();
 }
+extern "C" __declspec(dllexport) const char* __cdecl BeginPair(int index)
+{
+    g_residentsReady=true;
+    g_initialize=wxl::game::Native<InitializeFn>(off::kInitialize);
+    return BeginResidents(index);
+}
+extern "C" __declspec(dllexport) const char* __cdecl StepPair(unsigned token, float delta)
+{ return StepResidents(token,delta); }
+extern "C" __declspec(dllexport) const char* __cdecl ActPair(unsigned token, int index, int salute)
+{ return ActResidents(token,index,salute!=0); }
+extern "C" __declspec(dllexport) unsigned __cdecl PairToken() { return g_residents.token; }
+extern "C" __declspec(dllexport) void __cdecl StopPair() { StopResidents(); }
+void __cdecl FixtureRefresh() {}
+extern "C" __declspec(dllexport) void __cdecl RefreshPair()
+{ g_refresh=FixtureRefresh; Refresh(); }
+int fixtureSelection;
+int __cdecl FixtureSelect(void*)
+{ *reinterpret_cast<int*>(off::kSelected)=fixtureSelection; return 77; }
+extern "C" __declspec(dllexport) int __cdecl SelectPair(int index)
+{ g_ready=true; g_select=FixtureSelect; fixtureSelection=index; return Select(nullptr); }
+extern "C" __declspec(dllexport) void __cdecl AttachFixture(void* model, void* background, unsigned slot)
+{ wxl::game::m2::AttachToScene(model,background,slot,true); }
+extern "C" __declspec(dllexport) void __cdecl LightPair(void* model)
+{
+    wxl::game::Native<LightingFn>(Read<uintptr_t>(reinterpret_cast<uintptr_t>(model)+m2::kOffInstLightingCallbackFn))(
+        model,reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(model)+0x1D4),
+        reinterpret_cast<void*>(Read<uintptr_t>(reinterpret_cast<uintptr_t>(model)+m2::kOffInstLightingUserData)));
+}

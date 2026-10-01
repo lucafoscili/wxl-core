@@ -1,4 +1,4 @@
-// Actual selected/equipped actor only; no new model, world unit or network operation.
+// Actual roster residents through native equipment policy; no world unit or network operation.
 // GPL-3.0-or-later.
 #if defined(WXL_STORY_SELECT_TRIAL) || defined(WXL_CHARACTER_CAPACITY_TRIAL)
 #include "Performer.hpp"
@@ -69,9 +69,11 @@ namespace
     }
     using InitializeFn = void(__cdecl*)();
     InitializeFn g_initialize = nullptr;
+    void StopResidents();
     void __cdecl InitializeSelected()
     {
         // A normal/nested engine entry always keeps the original selection meaning.
+        StopResidents();
         auto previous = g_rowScope;
         g_rowScope = nullptr;
         g_initialize();
@@ -157,7 +159,11 @@ namespace
         }
         return false;
     }
-    struct Actor { uintptr_t frame = 0, model = 0; uint64_t guid = 0; int index = -1; };
+    struct Actor
+    {
+        uintptr_t frame = 0, model = 0, component = 0, mount = 0;
+        uint64_t guid = 0; int index = -1;
+    };
     struct Session
     {
         Actor actor;
@@ -170,7 +176,7 @@ namespace
     };
     Session g_session;
     uint32_t g_generation = 0;
-    bool g_ready = false, g_probeReady = false, g_capacityReady = false;
+    bool g_ready = false, g_probeReady = false, g_capacityReady = false, g_residentsReady = false;
     uint32_t g_rosterRevision = 0;
     using RefreshFn = void (__cdecl*)();
     RefreshFn g_refresh = nullptr;
@@ -178,21 +184,23 @@ namespace
     script::ValidateCallbackFn g_validate = nullptr;
     script::Function g_select = nullptr;
 
-    Actor Selected()
+    Actor Resident(int index)
     {
         Actor result;
         result.frame = Read<uintptr_t>(off::kFrame);
-        result.index = Read<int>(off::kSelected);
+        result.index = index;
         const auto count = Read<uint32_t>(off::kCount);
         const auto rows = Read<uintptr_t>(off::kRows);
         if (!result.frame || !rows || result.index < 0 || unsigned(result.index) >= count || count > wxl::offsets::game::capacity::kMaximum)
             return {};
         const auto row = rows + result.index * off::kRowStride;
         result.guid = Read<uint64_t>(row);
-        const auto customization = Read<uintptr_t>(row + off::kCustomization);
-        if (customization) result.model = Read<uintptr_t>(customization + off::kActor);
+        result.component = Read<uintptr_t>(row + off::kCustomization);
+        result.mount = Read<uintptr_t>(row + off::kMount);
+        if (result.component) result.model = Read<uintptr_t>(result.component + off::kActor);
         return result;
     }
+    Actor Selected() { return Resident(Read<int>(off::kSelected)); }
     bool Same(const Actor& a, const Actor& b)
     { return a.model && a.guid && a.model == b.model && a.guid == b.guid && a.frame == b.frame && a.index == b.index; }
 
@@ -253,6 +261,228 @@ namespace
             Sequence(old.actor.model, motion::kStand);
         }
     }
+
+    // Two native cache owners, in the same native background. These records own only
+    // temporary placement/activity and the extra resident's lighting callback binding.
+    // The native row continues to own component/model memory, including cold-row caches.
+    using LightingFn = void(__cdecl*)(void*,void*,void*);
+    struct ResidentState
+    {
+        Actor actor;
+        float origin[2][16]{};
+        uintptr_t lighting[2]{}, userData[2]{};
+        unsigned clip = motion::kStand;
+        float saluteSeconds = 0, remaining = 0;
+    };
+    struct Residents
+    {
+        ResidentState members[2];
+        uintptr_t rows = 0, background = 0;
+        uint32_t revision = 0, token = 0;
+        float waiting = 0;
+        bool placed = false;
+    };
+    Residents g_residents;
+    bool LiveResident(const Residents& owner, const Actor& actor)
+    {
+        // Never dereference captured model pointers after native rows/frame changed.
+        if (owner.rows!=Read<uintptr_t>(off::kRows) || owner.revision!=g_rosterRevision ||
+            actor.frame!=Read<uintptr_t>(off::kFrame)) return false;
+        const Actor current=Resident(actor.index);
+        return Same(current,actor) && current.component==actor.component && current.mount==actor.mount;
+    }
+    void __cdecl ResidentLighting(void* instance, void* lighting, void* userData)
+    {
+        const auto& owner = g_residents;
+        const auto& resident = owner.members[1];
+        if (!owner.token || userData != &g_residents.members[1] || !LiveResident(owner,resident.actor)) return;
+        const unsigned part = reinterpret_cast<uintptr_t>(instance) == resident.actor.model ? 0 : 1;
+        if (part && reinterpret_cast<uintptr_t>(instance) != resident.actor.mount) return;
+        if (!resident.lighting[part]) return;
+        RowScope scope(resident.actor.index,false);
+        wxl::game::Native<LightingFn>(resident.lighting[part])(
+            instance,lighting,reinterpret_cast<void*>(resident.userData[part]));
+    }
+    void StopResidents()
+    {
+        const Residents old = g_residents;
+        g_residents = {}; // invalidate callbacks before restoring native bindings
+        if (!old.token) return;
+        ++g_generation;
+        for (unsigned member=0; member<2; ++member)
+        {
+            const auto& resident=old.members[member];
+            if (!LiveResident(old,resident.actor)) continue;
+            const uintptr_t parts[] = {resident.actor.model,resident.actor.mount};
+            for (unsigned part=0; part<2; ++part)
+            {
+                const auto model=parts[part];
+                if (!model) continue;
+                if (member && Read<uintptr_t>(model+m2::kOffInstLightingCallbackFn)==reinterpret_cast<uintptr_t>(ResidentLighting) &&
+                    Read<uintptr_t>(model+m2::kOffInstLightingUserData)==reinterpret_cast<uintptr_t>(&g_residents.members[1]))
+                {
+                    *reinterpret_cast<uintptr_t*>(model+m2::kOffInstLightingCallbackFn)=resident.lighting[part];
+                    *reinterpret_cast<uintptr_t*>(model+m2::kOffInstLightingUserData)=resident.userData[part];
+                }
+                if (old.placed) Place(model,resident.origin[part]);
+                if (member && Read<uintptr_t>(model+m2::kOffInstParent)==old.background)
+                    wxl::game::Native<void(__fastcall*)(void*,void*)>(off::kDetachParent)(reinterpret_cast<void*>(model),nullptr);
+            }
+            if (old.placed) Sequence(resident.actor.model,motion::kStand);
+        }
+    }
+    bool ResidentsValid()
+    {
+        return g_residents.token && Same(Selected(),g_residents.members[0].actor) &&
+            LiveResident(g_residents,g_residents.members[0].actor) && LiveResident(g_residents,g_residents.members[1].actor) &&
+            Read<uintptr_t>(g_residents.members[0].actor.frame+off::kBackground)==g_residents.background;
+    }
+    const char* BeginResidents(int index)
+    {
+        Stop(); StopResidents();
+        const Actor selected=Selected(), extra=Resident(index);
+        if (!g_residentsReady || !g_initialize) return "unavailable";
+        if (!selected.model || !selected.guid || !extra.guid) return "actor-not-ready";
+        if (index==selected.index || selected.guid==extra.guid) return "same-resident";
+        const auto background=Read<uintptr_t>(selected.frame+off::kBackground);
+        if (!background || Read<uintptr_t>(selected.model+m2::kOffInstParent)!=background) return "scene-not-ready";
+        if (extra.model && Read<uintptr_t>(extra.model+m2::kOffInstParent)) return "resident-already-attached";
+        const auto rows=Read<uintptr_t>(off::kRows);
+        const auto revision=g_rosterRevision, generation=++g_generation;
+        { RowScope scope(index,true); g_initialize(); } // exact native equipment policy; no selection write
+        const Actor initialized=Resident(index);
+        if (rows!=Read<uintptr_t>(off::kRows) || revision!=g_rosterRevision || generation!=g_generation ||
+            !Same(selected,Selected()) || initialized.guid!=extra.guid || initialized.frame!=extra.frame)
+            return "interrupted";
+        if (!initialized.model) return "initializer-failed";
+        if (initialized.model==selected.model) return "same-model";
+        g_residents.rows=rows; g_residents.revision=revision;
+        g_residents.background=background; g_residents.token=generation;
+        g_residents.members[0].actor=selected; g_residents.members[1].actor=initialized;
+        for (unsigned member=0; member<2; ++member)
+        {
+            auto& resident=g_residents.members[member];
+            const uintptr_t parts[] = {resident.actor.model,resident.actor.mount};
+            for (unsigned part=0; part<2; ++part)
+            {
+                const auto model=parts[part]; if (!model) continue;
+                if (Read<uintptr_t>(model+m2::kOffInstParent)!=background) { StopResidents(); return "attachment-failed"; }
+                std::memcpy(resident.origin[part],reinterpret_cast<void*>(model+m2::kOffInstPlacement),sizeof(resident.origin[part]));
+                for (float value : resident.origin[part])
+                    if (!std::isfinite(value)) { StopResidents(); return "invalid-placement"; }
+                if (!member) continue;
+                resident.lighting[part]=Read<uintptr_t>(model+m2::kOffInstLightingCallbackFn);
+                resident.userData[part]=Read<uintptr_t>(model+m2::kOffInstLightingUserData);
+                if (resident.lighting[part] && resident.lighting[part]!=off::kLighting)
+                { StopResidents(); return "lighting-unavailable"; }
+                *reinterpret_cast<uintptr_t*>(model+m2::kOffInstLightingUserData)=reinterpret_cast<uintptr_t>(&resident);
+                *reinterpret_cast<uintptr_t*>(model+m2::kOffInstLightingCallbackFn)=reinterpret_cast<uintptr_t>(ResidentLighting);
+            }
+        }
+        return "loading";
+    }
+    const char* StepResidents(double token, double delta)
+    {
+        if (!g_residents.token || token!=g_residents.token) return "stale-generation";
+        if (!ResidentsValid() || !motion::ValidDelta(delta)) { StopResidents(); return "interrupted"; }
+        if (!g_residents.placed)
+        {
+            const auto& extra=g_residents.members[1].actor;
+            // Stock native per-component compose/geoset path, without shared UI fade or blocking waits.
+            const bool prepared=wxl::game::Native<bool(__fastcall*)(void*,void*,int)>(m2::kCharRenderPrep)(
+                reinterpret_cast<void*>(extra.component),nullptr,0);
+            bool drawable=prepared;
+            for (const auto& resident : g_residents.members)
+                for (uintptr_t model : {resident.actor.model,resident.actor.mount})
+                    if (model && !wxl::game::Native<m2::M2_IsDrawableFn>(m2::kIsDrawable)(reinterpret_cast<void*>(model),nullptr,0,1)) drawable=false;
+            g_residents.waiting+=static_cast<float>(delta);
+            if (!drawable)
+            {
+                if (g_residents.waiting>15) { StopResidents(); return "loading-timeout"; }
+                return "loading";
+            }
+            for (auto& resident : g_residents.members)
+            {
+                ClipSource source{resident.actor.model}; motion::ClipDiagnostic detail;
+                if (!motion::AdmitClip(source,motion::kStand,detail) || !motion::AdmitClip(source,motion::kSalute,detail))
+                { StopResidents(); return "unsupported-clips"; }
+                resident.saluteSeconds=detail.record.durationMs/1000.0f;
+            }
+            // Author a small side-by-side offset in the captured selected actor's local Y basis.
+            // Keep each native model's basis/scale, including any mount, and leave the camera alone.
+            for (unsigned member=0; member<2; ++member)
+            {
+                const auto& resident=g_residents.members[member];
+                const uintptr_t parts[] = {resident.actor.model,resident.actor.mount};
+                const auto& center=g_residents.members[0].origin[0];
+                const float offset=(member ? 0.5f : -0.5f)*motion::kG1ProbeRoute.legDistance;
+                for (unsigned part=0; part<2; ++part)
+                {
+                    if (!parts[part]) continue;
+                    float placed[16]; std::memcpy(placed,resident.origin[part],sizeof(placed));
+                    for (unsigned axis=0; axis<3; ++axis)
+                        placed[12+axis]+=center[12+axis]-resident.origin[0][12+axis]+center[4+axis]*offset;
+                    Place(parts[part],placed);
+                }
+                Sequence(resident.actor.model,motion::kStand);
+            }
+            g_residents.placed=true;
+        }
+        for (auto& resident : g_residents.members)
+        {
+            if (resident.clip!=motion::kSalute) continue;
+            resident.remaining-=motion::ClampedDelta(delta);
+            if (resident.remaining<=0) { Sequence(resident.actor.model,motion::kStand); resident.clip=motion::kStand; }
+        }
+        return "ready";
+    }
+    const char* ActResidents(double token, int index, bool salute)
+    {
+        if (!g_residents.token || token!=g_residents.token) return "stale-generation";
+        if (!ResidentsValid()) { StopResidents(); return "interrupted"; }
+        if (!g_residents.placed) return "loading";
+        for (auto& resident : g_residents.members)
+        {
+            if (resident.actor.index!=index) continue;
+            resident.clip=salute ? motion::kSalute : motion::kStand;
+            resident.remaining=salute ? resident.saluteSeconds : 0;
+            Sequence(resident.actor.model,resident.clip);
+            return salute ? "salute" : "stand";
+        }
+        return "wrong-resident";
+    }
+    int __cdecl ResidentsMethod(void* lua)
+    {
+        const char* status="unavailable";
+        const char* action=script::ToString(lua,2);
+        if (g_residentsReady && glue::MethodSelf(lua)==reinterpret_cast<void*>(Read<uintptr_t>(off::kFrame)) && action)
+        {
+            if (!std::strcmp(action,"stop")) { StopResidents(); status="stock"; }
+            else if (!std::strcmp(action,"step")) status=StepResidents(script::ToNumber(lua,3),script::ToNumber(lua,4));
+            else
+            {
+                const double requested=script::ToNumber(lua,!std::strcmp(action,"begin") ? 3 : 4);
+                if (std::isfinite(requested) && requested>=1 && requested<=wxl::offsets::game::capacity::kMaximum && requested==std::floor(requested))
+                {
+                    if (!std::strcmp(action,"begin")) status=BeginResidents(int(requested)-1);
+                    else if (!std::strcmp(action,"salute") || !std::strcmp(action,"stand"))
+                        status=ActResidents(script::ToNumber(lua,3),int(requested)-1,!std::strcmp(action,"salute"));
+                    else status="unknown-action";
+                }
+                else status="wrong-resident";
+            }
+        }
+        const bool ok=!std::strcmp(status,"stock") || !std::strcmp(status,"ready") || !std::strcmp(status,"loading") ||
+            !std::strcmp(status,"salute") || !std::strcmp(status,"stand");
+        script::PushBoolean(lua,ok); script::PushString(lua,status); script::PushNumber(lua,g_residents.token);
+        for (const auto& resident : g_residents.members)
+        {
+            char guid[17]{};
+            if (resident.actor.guid) std::snprintf(guid,sizeof(guid),"%016llx",static_cast<unsigned long long>(resident.actor.guid));
+            script::PushString(lua,guid); script::PushNumber(lua,resident.actor.index+1);
+        }
+        return 7;
+    }
     int Reply(void* lua, bool ok, const char* status, const Actor& actor = {}, const motion::ClipDiagnostic* detail = nullptr)
     {
         char guid[17]{};
@@ -281,6 +511,7 @@ namespace
         if (!std::strcmp(action, "inspect")) return Reply(lua, true, "selected", actor);
         if (!std::strcmp(action, "begin"))
         {
+            StopResidents();
             Stop();
             ClipSource source{actor.model};
             motion::ClipDiagnostic detail;
@@ -336,6 +567,7 @@ namespace
     }
     void __cdecl Refresh()
     {
+        StopResidents();
         Stop(); // restore while old rows still own their actors
         ++g_rosterRevision; // distinguish native refresh selection from user selection
         g_refresh();
@@ -345,18 +577,21 @@ namespace
         g_register(target);
         static const glue::Method probe[] = {{"WXLStorySelectProbe", Probe}};
         static const glue::Method identity[] = {{"WXLRosterIdentity", Identity}};
+        static const glue::Method residents[] = {{"WXLStorySelectResidents", ResidentsMethod}};
         if (g_probeReady) glue::AddMethods(target, probe, 1);
         if (g_capacityReady) glue::AddMethods(target, identity, 1);
+        if (g_residentsReady) glue::AddMethods(target, residents, 1);
     }
     void __cdecl Validate(uintptr_t function)
     {
         if ((g_probeReady && function == reinterpret_cast<uintptr_t>(&Probe)) ||
             (g_capacityReady && function == reinterpret_cast<uintptr_t>(&Identity))) return;
+        if (g_residentsReady && function == reinterpret_cast<uintptr_t>(&ResidentsMethod)) return;
         g_validate(function); // never broaden the callback permission to the entire DLL
     }
     int __cdecl Select(void* lua)
     {
-        if (g_ready) Stop(); // original actor still owned, before native changes/freeing
+        if (g_ready) { StopResidents(); Stop(); } // original actors still owned, before native changes/freeing
         return g_select(lua);
     }
     bool Install()
@@ -404,7 +639,19 @@ namespace
         g_probeReady = probe;
         g_capacityReady = capacity;
         g_ready = true;
-        WLOG_INFO("story-select: capacity50=%d actor-probe=%d; native acceptance pending", capacity, probe);
+        if (probe && wxl::config::Env("WXL_STORY_RESIDENTS",true))
+        {
+            bool compatible=true;
+            for (const auto& site : off::kResidentSites)
+            {
+                uint64_t value=0xcbf29ce484222325ULL;
+                for (size_t i=0; i<site.size; ++i) value=(value^Read<uint8_t>(site.address+i))*0x100000001b3ULL;
+                if (value!=site.hash) { WLOG_WARN("story-residents: incompatible %s; pair unavailable",site.name); compatible=false; }
+            }
+            if (compatible && wxl::hook::Install("StorySelectInitializer",off::kInitialize,&InitializeSelected,&g_initialize))
+                g_residentsReady=InstallResidentRedirects();
+        }
+        WLOG_INFO("story-select: capacity50=%d actor-probe=%d residents=%d; native acceptance pending", capacity, probe,g_residentsReady);
         return true;
     }
 }
