@@ -2,6 +2,14 @@
 
 **A modding framework for the World of Warcraft 3.3.5a (build 12340) client.**
 
+Velora development uses the canonical `F:/GitHub/wxl-core` checkout on `master`.
+Tracking, capacity 50, selector pages/camera, the upstream interfaces and custom
+body SkinAlpha now share that lineage. The retained Velora runtime is composed
+by its existing heel-runtime owner, rather than building a replacement without
+its overlays. The [companion checkout's consolidation checkpoint](../velora/wow/queued/features/story-select/WXL-CONSOLIDATION.md)
+records the exact offline build, validation and pending client delivery; this
+relative link is for the adjacent local repositories.
+
 WarcraftXL loads into the running client and gives mods a clean, typed way to talk to the engine -
 the same idea as RED4ext for Cyberpunk 2077 or SKSE for Skyrim. The framework owns the hard,
 repetitive parts (getting into the process, the hook engine, client offsets, engine bindings, an
