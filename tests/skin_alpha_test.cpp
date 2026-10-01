@@ -69,6 +69,43 @@ int main()
     sa::ClearAlpha(small.levels.data(), small.edge, sa::Rect{2, 2, 4, 4});
     Check(small.At(0, 3, 3) == 0xFF000000u, "an out-of-bounds region is left alone");
 
+    // Exact armour over a transparent sheet: the native blend (>> 8, alpha stated 255) run twice.
+    {
+        Sheet exact(8, 0x00C8A080u);  // the hidden skin colour, see-through
+        const uint32_t armour = 0x00204060u;
+        auto paint = [&](uint32_t coverage) {  // one native armour blit over the region at level 0
+            for (uint32_t y = 0; y < 4; ++y)
+                for (uint32_t x = 4; x < 8; ++x)
+                {
+                    if (x == 7)
+                        continue;  // a column the armour does not cover
+                    uint32_t& dst = exact.At(0, x, y), out = 0xFF000000u;
+                    for (int s = 0; s < 24; s += 8)
+                    {
+                        const uint32_t a = (armour >> s) & 0xFF, b = (dst >> s) & 0xFF;
+                        out |= ((a * coverage + b * (255 - coverage)) >> 8) << s;
+                    }
+                    dst = out;
+                }
+        };
+        sa::TwoPass pass;
+        pass.Take(exact.levels.data(), exact.edge, region);
+        Check(pass.Needed(), "a transparent region needs the exact paint");
+        pass.OverBlack(); paint(128); pass.OverWhite(); paint(128); pass.Finish();
+        const uint32_t half = exact.At(0, 5, 1);
+        Check((half >> 24) > 120 && (half >> 24) < 136, "half coverage stays half");
+        Check(((half >> 16) & 0xFF) < 0x28 && ((half >> 8) & 0xFF) > 0x38 && (half & 0xFF) > 0x58,
+              "its colour is the armour's, not mixed with the hidden skin");
+        Check(exact.At(0, 7, 1) == 0x00C8A080u, "an unpainted pixel stays see-through and unchanged");
+
+        Sheet full(8, 0x00C8A080u);
+        sa::TwoPass solid;
+        solid.Take(full.levels.data(), full.edge, region);
+        auto opaque = [&]() { for (uint32_t x = 4; x < 8; ++x) full.At(0, x, 0) = 0xFF000000u | armour; };
+        solid.OverBlack(); opaque(); solid.OverWhite(); opaque(); solid.Finish();
+        Check(full.At(0, 5, 0) == (0xFF000000u | armour), "solid armour is solid and its own colour");
+    }
+
     // Only custom bodies get an uncompressed sheet.
     Check(!sa::IsCustomBody("Character\\Human\\Female\\HumanFemale"), "a stock race model is stock");
     Check(!sa::IsCustomBody("CHARACTER\\Velora\\Personal\\umbra\\VeloraStock_x"), "a stock-derived model is stock");

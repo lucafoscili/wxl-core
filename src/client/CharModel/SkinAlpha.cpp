@@ -127,10 +127,28 @@ namespace
     void __cdecl hkPaintFromOrigin(uint32_t regionIndex, void* source, void** levels)
     {
         thread_local sa::Snapshot snapshot;
+        thread_local sa::TwoPass exact;
         sa::Rect region;
         if (!levels || !Region(regionIndex, region))
         {
             g_origPaintFromOrigin(regionIndex, source, levels);
+            return;
+        }
+        if (t_customSheet)
+        {
+            // A custom body's armour lies over its own skin: its colour and coverage must be the
+            // armour's alone, not blended with the sheet's hidden skin colour (TwoPass).
+            exact.Take(levels, SheetResolution(), region);
+            if (!exact.Needed())
+            {
+                g_origPaintFromOrigin(regionIndex, source, levels);
+                return;
+            }
+            exact.OverBlack();
+            g_origPaintFromOrigin(regionIndex, source, levels);
+            exact.OverWhite();
+            g_origPaintFromOrigin(regionIndex, source, levels);
+            exact.Finish();
             return;
         }
         snapshot.Take(levels, SheetResolution(), region);

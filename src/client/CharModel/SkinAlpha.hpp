@@ -136,4 +136,101 @@ namespace wxl::client::skinalpha
                     *pixels[i] = values[i];
         }
     };
+
+    /**
+     * @brief An armour paint over a transparent sheet, made exact by painting it twice.
+     *
+     * The native blits blend a semi-transparent armour pixel with whatever colour lies beneath and
+     * report the result opaque, so over a transparent skin the hidden skin colour leaks into the
+     * armour. Painting once over black and once over white separates the two: for a pixel of
+     * coverage a and colour A, black gives a*A and white gives a*A + (1 - a) * 255, so their
+     * difference is the transparency and the black result divided by a is the colour. A pixel that
+     * already held coverage starts from its own colour premultiplied, so successive paints combine
+     * as the client would; one the paint never touched comes back as it was. Opaque pixels are
+     * painted once, over themselves, exactly as natively.
+     */
+    struct TwoPass
+    {
+        std::vector<uint32_t*> pixels;  ///< every pixel of the region
+        std::vector<uint32_t> values;   ///< their values before the paint
+        std::vector<size_t> clear;      ///< indices of the non-opaque ones
+        std::vector<uint32_t> black;    ///< their results over black
+
+        void Take(void* const* levels, uint32_t resolution, const Rect& region)
+        {
+            pixels.clear();
+            values.clear();
+            clear.clear();
+            ForEachPixel(levels, resolution, region, [this](uint32_t* pixel)
+            {
+                if ((*pixel & kAlphaMask) != kAlphaMask)
+                    clear.push_back(pixels.size());
+                pixels.push_back(pixel);
+                values.push_back(*pixel);
+            });
+        }
+
+        /// False when the region is fully opaque: one native paint is already exact.
+        bool Needed() const { return !clear.empty(); }
+
+        /// Before the first paint: each non-opaque pixel as its colour over black.
+        void OverBlack() const
+        {
+            for (size_t i : clear)
+                *pixels[i] = Over(values[i], 0);
+        }
+
+        /// After the first paint: keep those results, put the region back, and lay them over white.
+        void OverWhite()
+        {
+            black.resize(clear.size());
+            for (size_t k = 0; k < clear.size(); ++k)
+                black[k] = *pixels[clear[k]];
+            for (size_t i = 0; i < pixels.size(); ++i)
+                *pixels[i] = values[i];
+            for (size_t i : clear)
+                *pixels[i] = Over(values[i], 255);
+        }
+
+        /// After the second paint: coverage from the difference, colour from the black result.
+        void Finish() const
+        {
+            for (size_t k = 0; k < clear.size(); ++k)
+            {
+                const uint32_t over_black = black[k], over_white = *pixels[clear[k]];
+                int through = 0;
+                for (int shift = 0; shift < 24; shift += 8)
+                    through += static_cast<int>((over_white >> shift) & 0xFF) - static_cast<int>((over_black >> shift) & 0xFF);
+                const int coverage = 255 - Clamp((through + 1) / 3);
+                if (coverage <= 0)
+                {
+                    *pixels[clear[k]] = values[clear[k]] & kColourMask;  // untouched and see-through
+                    continue;
+                }
+                uint32_t colour = 0;
+                for (int shift = 0; shift < 24; shift += 8)
+                {
+                    const int premultiplied = static_cast<int>((over_black >> shift) & 0xFF);
+                    colour |= static_cast<uint32_t>(Clamp((premultiplied * 255 + coverage / 2) / coverage)) << shift;
+                }
+                *pixels[clear[k]] = (static_cast<uint32_t>(coverage) << 24) | colour;
+            }
+        }
+
+    private:
+        static int Clamp(int value) { return value < 0 ? 0 : value > 255 ? 255 : value; }
+
+        /// A pixel of some coverage, laid over a flat grey level, as an opaque pixel.
+        static uint32_t Over(uint32_t pixel, int background)
+        {
+            const int alpha = static_cast<int>(pixel >> 24);
+            uint32_t out = kAlphaMask;
+            for (int shift = 0; shift < 24; shift += 8)
+            {
+                const int channel = static_cast<int>((pixel >> shift) & 0xFF);
+                out |= static_cast<uint32_t>(Clamp((channel * alpha + background * (255 - alpha) + 127) / 255)) << shift;
+            }
+            return out;
+        }
+    };
 }
