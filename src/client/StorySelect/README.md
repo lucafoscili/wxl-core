@@ -31,3 +31,20 @@ Velora's `wow/outfit-authoring/mesh-workshop/native/heel-runtime/prepare.py`;
 the owning checkpoint is `wow/queued/features/story-select/README.md`.
 
 These checks cannot prove equipped rendering, art quality or frame performance.
+# Living harbour candidate — 1 October 2026
+
+Fixed pages anchor placement to authored slot zero's native origin/basis, rather
+than recentering on the selected actor. Member zero still identifies the actual
+selected native row; native selection/entry and cleanup retain their owners.
+`scene` shares the page owner with seven values per row: index, GUID, lateral,
+depth, activity (Stand/Salute/Walk), initial delay (0–60 seconds) and idle interval
+(3–60 seconds). Missing optional clips remain Stand; existing `page` calls retain
+their five-value protocol and original default timing.
+
+`camera-hold` shares the admitted camera path but starts and holds its bounded
+wide endpoint. It does not replay a zoom on each selection. Stop, rotation,
+selection teardown, refresh, hide and entry restore native camera/time before
+forwarding. The optional legacy camera trial still expires normally.
+`check_story_pages.py` and `check_story_camera.py` execute these contracts through
+the compiled owner; visual framing and actual available-roster coverage remain
+native acceptance questions.

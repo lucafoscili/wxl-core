@@ -274,7 +274,7 @@ namespace
         uintptr_t lighting[2]{}, userData[2]{};
         unsigned clip = motion::kStand;
         float saluteSeconds = 0, remaining = 0;
-        float staged[2][16]{}, lateral = 0, depth = 0, activityDelay = 0, walkTime = 0;
+        float staged[2][16]{}, lateral = 0, depth = 0, activityDelay = 0, activityInterval = 4, walkTime = 0;
         unsigned slot = 0, activity = 0;
         bool saluteSupported = false, walkSupported = false;
     };
@@ -290,13 +290,14 @@ namespace
         uintptr_t trialCamera = 0;
         unsigned cameraDuration = 0;
         float cameraTime = 0;
+        bool cameraPersistent = false;
     };
     Residents g_residents;
     void StopCamera(Residents& owner)
     {
         if (!owner.trialCamera) return;
         const auto camera=owner.trialCamera;
-        owner.trialCamera=0; owner.cameraTime=0; owner.cameraDuration=0;
+        owner.trialCamera=0; owner.cameraTime=0; owner.cameraDuration=0; owner.cameraPersistent=false;
         const auto frame=owner.members[0].actor.frame;
         // Do not dereference an old background/model after native replacement.
         if (frame!=Read<uintptr_t>(off::kFrame) || !frame || Read<uintptr_t>(frame+off::kBackground)!=owner.background) return;
@@ -365,7 +366,7 @@ namespace
             if (!LiveResident(g_residents,g_residents.members[i].actor)) return false;
         return true;
     }
-    const char* BeginCamera(double token, const char* stem, double duration)
+    const char* BeginCamera(double token, const char* stem, double duration, bool persistent=false)
     {
         if (!g_residents.token || token!=g_residents.token) return "stale-generation";
         if (!ResidentsValid()) { StopResidents(); return "interrupted"; }
@@ -384,11 +385,18 @@ namespace
         if (!original || !trial || Read<uintptr_t>(frame+off::kFrameCamera)!=original) return "camera-unavailable";
         wxl::game::Native<void(__fastcall*)(void*,void*,unsigned)>(off::kFrameSetCamera)(reinterpret_cast<void*>(frame),nullptr,1);
         if (Read<uintptr_t>(frame+off::kFrameCamera)!=trial) return "camera-unavailable";
-        g_residents.trialCamera=trial; g_residents.cameraDuration=unsigned(duration); g_residents.cameraTime=0;
-        wxl::game::Native<void(__fastcall*)(void*,void*,unsigned,unsigned)>(off::kFrameSetSequenceTime)(reinterpret_cast<void*>(frame),nullptr,0,0);
+        g_residents.trialCamera=trial; g_residents.cameraDuration=unsigned(duration);
+        g_residents.cameraTime=persistent ? float(duration) : 0;
+        g_residents.cameraPersistent=persistent;
+        wxl::game::Native<void(__fastcall*)(void*,void*,unsigned,unsigned)>(off::kFrameSetSequenceTime)(
+            reinterpret_cast<void*>(frame),nullptr,0,unsigned(g_residents.cameraTime));
         return "camera";
     }
-    struct ResidentRequest { int index; uint64_t guid; float lateral, depth; unsigned activity; };
+    struct ResidentRequest
+    {
+        int index; uint64_t guid; float lateral, depth; unsigned activity;
+        float delay = -1, interval = -1; // legacy pages retain their existing slot schedule
+    };
     const char* BeginGroup(const ResidentRequest* requests, unsigned count, uint32_t revision, bool page)
     {
         Stop(); StopResidents();
@@ -401,7 +409,10 @@ namespace
         {
             const auto& request=requests[i]; const Actor actor=Resident(request.index);
             if (!actor.guid || actor.guid!=request.guid || !std::isfinite(request.lateral) ||
-                !std::isfinite(request.depth) || std::abs(request.lateral)>6 || std::abs(request.depth)>6 || request.activity>2)
+                !std::isfinite(request.depth) || std::abs(request.lateral)>6 || std::abs(request.depth)>6 || request.activity>2 ||
+                !std::isfinite(request.delay) || !std::isfinite(request.interval) ||
+                (request.delay!=-1 && (request.delay<0 || request.delay>60)) ||
+                (request.interval!=-1 && (request.interval<3 || request.interval>60)))
                 return "invalid-page";
             for (unsigned prior=0; prior<i; ++prior)
                 if (requests[prior].guid==request.guid || requests[prior].index==request.index) return "same-resident";
@@ -431,7 +442,9 @@ namespace
             if (!actor.model) { StopResidents(); return "initializer-failed"; }
             auto& resident=g_residents.members[member];
             resident.actor=actor; resident.slot=slot; resident.lateral=request.lateral; resident.depth=request.depth;
-            resident.activity=page ? request.activity : 0; resident.activityDelay=.7f*(slot+1);
+            resident.activity=page ? request.activity : 0;
+            resident.activityDelay=request.delay<0 ? .7f*(slot+1) : request.delay;
+            resident.activityInterval=request.interval<0 ? 4.0f+.4f*slot : request.interval;
             for (unsigned prior=0; prior<member; ++prior)
             {
                 const auto& previous=g_residents.members[prior].actor;
@@ -499,15 +512,18 @@ namespace
                 resident.saluteSeconds=resident.saluteSupported ? detail.record.durationMs/1000.0f : 1.0f;
                 resident.walkSupported=!resident.actor.mount && motion::AdmitClip(source,motion::kWalk,detail);
             }
-            // Author a small side-by-side offset in the captured selected actor's local Y basis.
-            // Keep each native model's basis/scale, including any mount, and leave the camera alone.
+            // Fixed pages use their first authored GUID's native origin/basis, independently
+            // of focus. Keep each resident's own scale/basis and mount-relative placement.
+            const ResidentState* anchor=&g_residents.members[0];
+            if (g_residents.page)
+                for (unsigned i=0; i<g_residents.count; ++i)
+                    if (!g_residents.members[i].slot) anchor=&g_residents.members[i];
             for (unsigned member=0; member<g_residents.count; ++member)
             {
                 auto& resident=g_residents.members[member];
                 const uintptr_t parts[] = {resident.actor.model,resident.actor.mount};
-                const auto& center=g_residents.members[0].origin[0];
-                const float lateral=resident.lateral-(g_residents.page ? g_residents.members[0].lateral : 0);
-                const float depth=resident.depth-(g_residents.page ? g_residents.members[0].depth : 0);
+                const auto& center=anchor->origin[0];
+                const float lateral=resident.lateral, depth=resident.depth;
                 for (unsigned part=0; part<2; ++part)
                 {
                     if (!parts[part]) continue;
@@ -542,7 +558,7 @@ namespace
                 resident.activityDelay-=elapsed;
                 if (resident.activityDelay<=0)
                 {
-                    resident.activityDelay=4.0f+.4f*resident.slot;
+                    resident.activityDelay=resident.activityInterval;
                     if (resident.activity==1 && resident.saluteSupported)
                     { resident.clip=motion::kSalute; resident.remaining=resident.saluteSeconds; Sequence(resident.actor.model,resident.clip); }
                     else if (resident.activity==2 && resident.walkSupported)
@@ -553,12 +569,15 @@ namespace
         if (g_residents.trialCamera)
         {
             g_residents.cameraTime+=motion::ClampedDelta(delta)*1000;
+            if (g_residents.cameraPersistent)
+                g_residents.cameraTime=(std::min)(g_residents.cameraTime,float(g_residents.cameraDuration));
             const auto frame=g_residents.members[0].actor.frame;
-            if (g_residents.cameraTime>=g_residents.cameraDuration || Read<uintptr_t>(frame+off::kFrameCamera)!=g_residents.trialCamera)
+            if ((!g_residents.cameraPersistent && g_residents.cameraTime>=g_residents.cameraDuration) ||
+                Read<uintptr_t>(frame+off::kFrameCamera)!=g_residents.trialCamera)
                 StopCamera(g_residents);
             else
                 wxl::game::Native<void(__fastcall*)(void*,void*,unsigned,unsigned)>(off::kFrameSetSequenceTime)(
-                    reinterpret_cast<void*>(frame),nullptr,0,unsigned(g_residents.cameraTime));
+                    reinterpret_cast<void*>(frame),nullptr,0,unsigned((std::min)(g_residents.cameraTime,float(g_residents.cameraDuration))));
         }
         return "ready";
     }
@@ -574,7 +593,7 @@ namespace
             if ((action==1 && !resident.saluteSupported) || (action==2 && !resident.walkSupported)) return "unsupported-activity";
             resident.clip=action==1 ? motion::kSalute : action==2 ? motion::kWalk : motion::kStand;
             resident.remaining=action==1 ? resident.saluteSeconds : 0; resident.walkTime=0;
-            resident.activityDelay=4.0f+.4f*resident.slot;
+            resident.activityDelay=resident.activityInterval;
             Place(resident.actor.model,resident.staged[0]);
             Sequence(resident.actor.model,resident.clip);
             return action==1 ? "salute" : action==2 ? "walk" : "stand";
@@ -589,22 +608,33 @@ namespace
         {
             if (!std::strcmp(action,"stop")) { StopResidents(); status="stock"; }
             else if (!std::strcmp(action,"step")) status=StepResidents(script::ToNumber(lua,3),script::ToNumber(lua,4));
-            else if (!std::strcmp(action,"page"))
+            else if (!std::strcmp(action,"page") || !std::strcmp(action,"scene"))
             {
                 const double revision=script::ToNumber(lua,3), count=script::ToNumber(lua,4);
                 ResidentRequest requests[10]{}; bool valid=std::isfinite(count) && count>=1 && count<=10 && count==std::floor(count) &&
                     std::isfinite(revision) && revision>=0 && revision<=UINT32_MAX && revision==std::floor(revision);
                 for (unsigned i=0; valid && i<unsigned(count); ++i)
                 {
-                    const unsigned at=5+i*5; const double index=script::ToNumber(lua,at), activity=script::ToNumber(lua,at+4);
+                    const bool timed=!std::strcmp(action,"scene");
+                    const unsigned at=5+i*(timed ? 7 : 5); const double index=script::ToNumber(lua,at), activity=script::ToNumber(lua,at+4);
                     const char* guid=script::ToString(lua,at+1);
                     valid=std::isfinite(index) && index>=1 && index<=50 && index==std::floor(index) && guid && std::strlen(guid)==16 &&
                         std::strspn(guid,"0123456789abcdefABCDEF")==16 && std::isfinite(activity) && activity>=0 && activity<=2 && activity==std::floor(activity);
-                    if (valid) requests[i]={int(index)-1,std::strtoull(guid,nullptr,16),float(script::ToNumber(lua,at+2)),float(script::ToNumber(lua,at+3)),unsigned(activity)};
+                    if (valid)
+                    {
+                        requests[i]={int(index)-1,std::strtoull(guid,nullptr,16),float(script::ToNumber(lua,at+2)),float(script::ToNumber(lua,at+3)),unsigned(activity)};
+                        if (timed)
+                        {
+                            requests[i].delay=float(script::ToNumber(lua,at+5));
+                            requests[i].interval=float(script::ToNumber(lua,at+6));
+                            valid=requests[i].delay>=0 && requests[i].interval>=3;
+                        }
+                    }
                 }
                 status=valid ? BeginGroup(requests,unsigned(count),uint32_t(revision),true) : "invalid-page";
             }
-            else if (!std::strcmp(action,"camera")) status=BeginCamera(script::ToNumber(lua,3),script::ToString(lua,4),script::ToNumber(lua,5));
+            else if (!std::strcmp(action,"camera") || !std::strcmp(action,"camera-hold"))
+                status=BeginCamera(script::ToNumber(lua,3),script::ToString(lua,4),script::ToNumber(lua,5),!std::strcmp(action,"camera-hold"));
             else if (!std::strcmp(action,"camera-stop"))
             {
                 if (g_residents.token && script::ToNumber(lua,3)==g_residents.token)

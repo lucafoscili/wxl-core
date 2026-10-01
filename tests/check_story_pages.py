@@ -15,8 +15,8 @@ def requests(f, indices, *, activities=False):
     address=f.MEMORY+0x91000
     for slot,index in enumerate(indices):
         guid=struct.unpack('<Q',f.cpu.mem_read(f.ROWS+index*0x198,8))[0]
-        f.cpu.mem_write(address+slot*32,struct.pack('<I4xQffI4x',index,guid,slot*.4,slot*.2,
-                                                   (slot%3) if activities else 0))
+        f.cpu.mem_write(address+slot*40,struct.pack('<I4xQffIff4x',index,guid,slot*.4,slot*.2,
+                                                   (slot%3) if activities else 0,-1,-1))
     return address
 
 
@@ -69,13 +69,14 @@ def exercise(client,library):
         assert f.call('PageIndex',0)==0
         assert f.get(0xAC436C)==0 and len(f.created)==count-1
         assert f.step(token)=='ready'
-        assert placement(f,f.selected_model)==origin
+        selected_placement=struct.unpack('<16f',placement(f,f.selected_model))
+        assert abs(selected_placement[13]-order.index(0)*.4)<1e-5
         for index in range(1,count):
             actor=model(f,index)
-            slot=order.index(index); focus=order.index(0)
+            slot=order.index(index)
             placed=struct.unpack('<16f',placement(f,actor))
-            assert abs(placed[13]-(slot-focus)*.4)<1e-5
-            assert abs(placed[12]-(slot-focus)*.2)<1e-5
+            assert abs(placed[13]-slot*.4)<1e-5
+            assert abs(placed[12]-slot*.2)<1e-5
             f.call('LightPair',actor)
             assert f.lights[-1][0]==f.ROWS+index*0x198
             equipment={display for _,_,_,display in f.equipment if 1000*(index+1)<=display<1000*(index+1)+23}
@@ -91,12 +92,24 @@ def exercise(client,library):
         assert f.step(token)=='stale-generation' and f.call('PairToken')==next_token
         assert f.step(next_token)=='ready'
     passed.append('one-three-ten-guid-ordered-cold-native-rows-equipment-lighting-focus-and-cached-restart')
+    f=Fixture(client,library); f.roster(5)
+    assert begin(f,list(range(5)))=='loading'; token=f.call('PairToken'); assert f.step(token)=='ready'
+    fixed={index:placement(f,model(f,index)) for index in range(5)}
+    for focus in (3,1,4,0,2):
+        assert f.call('SelectPair',focus)==77 and f.get(0xAC436C)==focus
+        f.call('InitializeNormal') # original selected actor detach/reparent path
+        assert begin(f,list(range(5)))=='loading'
+        token=f.call('PairToken'); assert f.step(token)=='ready'
+        assert all(placement(f,model(f,index))==fixed[index] for index in range(5))
+        assert f.call('PageIndex',0)==focus
+    f.call('StopPair')
+    passed.append('five-resident-authored-slots-stay-fixed-through-native-selection-and-reinitialization')
 
     for failure,expected in (('duplicate','same-resident'),('guid','invalid-page'),('index','invalid-page'),
                              ('revision','invalid-page'),('outside','selection-outside-page'),('zero','invalid-page'),('eleven','invalid-page')):
         f=Fixture(client,library); f.roster(50)
         at=requests(f,[0,1,2]); count=3; revision=0
-        if failure=='duplicate': f.cpu.mem_write(at+32,bytes(f.cpu.mem_read(at,32)))
+        if failure=='duplicate': f.cpu.mem_write(at+40,bytes(f.cpu.mem_read(at,40)))
         elif failure=='guid': f.cpu.mem_write(at+8,struct.pack('<Q',0xdead))
         elif failure=='index': f.put(at,50)
         elif failure=='revision': revision=1
@@ -179,6 +192,24 @@ def exercise(client,library):
         except RuntimeError as error: raise RuntimeError(f'parser input {at}={value!r}: {error}') from error
         assert reply[:2]==[False,'invalid-page'] and reply[8:]==[0,''], (at,value,reply)
     passed.append('compiled-lua-parser-strict-hex-finite-bounds-and-complete-authored-page-identity-reply')
+    f=Fixture(client,library); f.roster(5); call=lua_method(f)
+    timed=[0,5]
+    for index in range(5):
+        timed.extend([index+1,f'{0x1111+index:016x}',index*.4,index*.2,index%3,2+index*3,12+index*2])
+    reply=call('scene',*timed); assert reply[:2]==[True,'loading']
+    token=int(reply[2])
+    for index in range(5): walk_clip(f,model(f,index))
+    assert call('step',token,.05)[:2]==[True,'ready']
+    f.sequences.clear()
+    for _ in range(90): assert call('step',token,.05)[:2]==[True,'ready']
+    assert (model(f,1),113) not in f.sequences
+    for _ in range(12): call('step',token,.05)
+    assert (model(f,1),113) in f.sequences and (model(f,2),4) not in f.sequences
+    call('stop')
+    for at,value in ((7,float('nan')),(7,-1),(8,2),(8,61),(8,float('inf'))):
+        malformed=list(timed); malformed[at]=value
+        assert call('scene',*malformed)[:2]==[False,'invalid-page']
+    passed.append('authored-independent-native-activity-timing-and-strict-scene-parser-bounds')
     return dict(status='offline-page-fixtures-passed',cases=passed,
                 limits='Original native initializer/equipment/attachment and compiled owner; synthetic composition leaves. No ten-equipped render or performance acceptance.')
 

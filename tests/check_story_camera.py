@@ -37,7 +37,7 @@ def setup(client, library, count=2):
     else:
         requests=f.MEMORY+0x91000
         for index in range(count):
-            f.cpu.mem_write(requests+index*32,struct.pack('<I4xQffI4x',index,0x1111+index,index*.4,0,0))
+            f.cpu.mem_write(requests+index*40,struct.pack('<I4xQffIff4x',index,0x1111+index,index*.4,0,0,-1,-1))
         assert f.status('BeginPage',requests,count,0)=='loading'
     token = f.call('PairToken'); assert f.step(token) == 'ready'
     shared = f.get(f.BACKGROUND + 0x2C); header = f.get(shared + 0x150)
@@ -137,6 +137,15 @@ def exercise(client, library):
         actor=f.get(f.get(f.ROWS+index*0x198+0x188)+0x38)
         assert f.get(actor+0x48)==0 and f.get(actor+0x2ac)==0x4e3a20
     cases.append('ten-resident-camera-expiry-and-active-selection-restore-entire-group-before-native-target')
+    f, token, original, trial, stem = setup(client,library,5)
+    assert f.status('HoldCameraPair',token,stem,800)=='camera'
+    assert f.camera_events[-1]==(f.BACKGROUND,0,800) # no replayed close-to-wide pan on selection
+    for _ in range(240): assert f.step(token,.05)=='ready'
+    assert f.call('PairCameraActive')==1 and f.get(f.FRAME+0x2a4)==trial
+    assert f.camera_events[-1]==(f.BACKGROUND,0,800)
+    f.call('StopPair')
+    assert f.call('PairCameraActive')==0 and f.get(f.FRAME+0x2a4)==original
+    cases.append('persistent-harbour-camera-clamps-wide-time-and-restores-on-scene-stop')
     return dict(passed=cases, limits='Compiled owning controller and native camera/cache-path instructions; synthetic appearance/readiness/sequence and cache file/allocator/load leaves. No rendering or attachment-motion verdict.')
 
 
