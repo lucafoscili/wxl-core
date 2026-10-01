@@ -113,7 +113,7 @@ int main()
         Check(dh::HidesHair(1u << 1, 1), "a helm hiding human hair hides it for a human");
         Check(!dh::HidesHair(1u << 4, 1), "a helm hiding only night elf hair leaves a human's");
         Check(!dh::HidesHair(0xFFFFFFFFu, 40), "an out-of-range race is never hidden");
-        Check(dh::VolumeId(0) == 2001 && dh::VolumeId(1) == 65536 + 2001, "the volume id per level");
+        Check(dh::VolumeId(0) == 9001 && dh::VolumeId(1) == 65536 + 9001, "the volume id per level");
         Check(dh::kHairVolumeGeoset > 2000, "the volume sits above the client's blanket-hidden range");
     }
 

@@ -23,12 +23,13 @@
  * its race; its scalp stays. A custom body (a donor) marks the hair VOLUME it can lose -- strand
  * cards -- with one reserved geoset id, and keeps its roots (the hair cap) in the base geoset, so
  * the same helm hides the volume and leaves a hairline instead of baldness. The id sits above the
- * 0..2000 range the client's geoset pass blanket-hides, so only this feature ever toggles it.
+ * 0..2000 range the client's geoset pass blanket-hides, and clear of retail-era groups such as
+ * the HD bodies' bare feet (2001, which heel items hide), so only this feature ever toggles it.
  */
 namespace wxl::client::donorhair
 {
     /// The geoset id a donor's helm-hidden hair volume carries (Velora's writer assigns it).
-    constexpr uint32_t kHairVolumeGeoset = 2001;
+    constexpr uint32_t kHairVolumeGeoset = 9001;
 
     /// How many vertex-window levels a section id can carry above it ((level << 16) | id).
     constexpr uint32_t kLevels = 4;
