@@ -5,7 +5,7 @@
 #include "engine/hook/Registry.hpp"
 #undef WXL_REGISTER_FEATURE_PHASED
 #define WXL_REGISTER_FEATURE_PHASED(...)
-#include "../src/client/StorySelect/StorySelect.cpp"
+#include "client/StorySelect/StorySelect.cpp" // -I chooses owning checkout or prepared composition
 #include <new>
 
 __declspec(thread) alignas(RowScope) uint8_t fixtureScope[sizeof(RowScope)];
