@@ -24,6 +24,139 @@ namespace
     namespace script = wxl::game::script;
     namespace motion = wxl::story;
     using wxl::mem::Read;
+    // Only the stock initializer and its lighting callback consume this scoped row.
+    // TLS keeps native composition/other threads on their real selected index.
+    struct RowScope;
+    __declspec(thread) RowScope* g_rowScope = nullptr;
+    struct RowScope
+    {
+        int index;
+        bool initializing;
+        float facingSink = 0;
+        uint8_t selectorSink[0x130]; // initializer only writes receiver+0x12C; never reads it
+        RowScope* previous;
+        RowScope(int row, bool initialize) : index(row), initializing(initialize), previous(g_rowScope)
+        { g_rowScope = this; }
+        ~RowScope() { g_rowScope = previous; }
+        RowScope(const RowScope&) = delete;
+    };
+    bool InitializingRow() { return g_rowScope && g_rowScope->initializing; }
+    __declspec(noinline) int __cdecl ContextIndex()
+    { return g_rowScope ? g_rowScope->index : Read<int>(off::kSelected); }
+    __declspec(noinline) float* __cdecl FacingTarget()
+    { return InitializingRow() ? &g_rowScope->facingSink : reinterpret_cast<float*>(0xB6B204); }
+    // PUSHAD layout: EDI, ESI, EBP, ESP, EBX, EDX, ECX, EAX. Preserve flags and every
+    // register except the MOV's original destination, and leave the x87 stack intact.
+#define ROW_READER(name, savedOffset) \
+    __declspec(naked) void name() { \
+        __asm { pushfd } __asm { pushad } __asm { call ContextIndex } \
+        __asm { mov [esp + savedOffset], eax } __asm { popad } __asm { popfd } __asm { ret } }
+    ROW_READER(ReadRowEAX,28)
+    ROW_READER(ReadRowEBX,16)
+    ROW_READER(ReadRowECX,24)
+    ROW_READER(ReadRowEDX,20)
+    ROW_READER(ReadRowESI,4)
+#undef ROW_READER
+    __declspec(naked) void ResetFacing()
+    {
+        __asm { pushfd }
+        __asm { pushad }
+        __asm { call FacingTarget }
+        __asm { fstp dword ptr [eax] }
+        __asm { popad }
+        __asm { popfd }
+        __asm { ret }
+    }
+    using InitializeFn = void(__cdecl*)();
+    InitializeFn g_initialize = nullptr;
+    void __cdecl InitializeSelected()
+    {
+        // A normal/nested engine entry always keeps the original selection meaning.
+        auto previous = g_rowScope;
+        g_rowScope = nullptr;
+        g_initialize();
+        g_rowScope = previous;
+    }
+    void __fastcall InitializeDetach(void* parent, void*, uint32_t slot)
+    { if (!InitializingRow()) wxl::game::m2::DetachSlot(parent,slot); }
+    void __cdecl InitializeFacing(float facing)
+    {
+        if (!InitializingRow())
+            wxl::game::Native<void(__cdecl*)(float)>(0x4E2E70)(facing);
+    }
+    void __cdecl InitializeCurve(void* curve)
+    {
+        if (!InitializingRow())
+            wxl::game::Native<void(__cdecl*)(void*)>(0x8C02E0)(curve);
+    }
+    void* __cdecl InitializeSelectorState()
+    {
+        return InitializingRow() ? g_rowScope->selectorSink :
+            wxl::game::Native<void*(__cdecl*)()>(0x7ECEF0)();
+    }
+    void __cdecl InitializeFade(void* component, int created)
+    {
+        // Extra residents use their per-component nonblocking readiness path in Step.
+        // Never hide/change the selected actor or queue the shared selector fade.
+        if (!InitializingRow())
+            wxl::game::Native<void(__cdecl*)(void*,int)>(0x4E6AE0)(component,created);
+    }
+    struct Redirect { uintptr_t site, target; uint8_t size; };
+    constexpr size_t kRowReads = sizeof(off::kRowReads)/sizeof(off::kRowReads[0]);
+    constexpr size_t kRedirects = kRowReads + 8;
+    Redirect ResidentRedirect(size_t index)
+    {
+        if (index < kRowReads)
+        {
+            const auto& row = off::kRowReads[index];
+            void(*reader)() = nullptr;
+            switch (row.target)
+            {
+                case off::RowRegister::EAX: reader=ReadRowEAX; break;
+                case off::RowRegister::EBX: reader=ReadRowEBX; break;
+                case off::RowRegister::ECX: reader=ReadRowECX; break;
+                case off::RowRegister::EDX: reader=ReadRowEDX; break;
+                case off::RowRegister::ESI: reader=ReadRowESI; break;
+            }
+            return {row.address,reinterpret_cast<uintptr_t>(reader),row.size};
+        }
+        const Redirect sideEffects[] = {
+            {0x4E3D1C,reinterpret_cast<uintptr_t>(InitializeDetach),5},
+            {0x4E3D3E,reinterpret_cast<uintptr_t>(InitializeDetach),5},
+            {0x4E4474,reinterpret_cast<uintptr_t>(InitializeFacing),5},
+            {0x4E440F,reinterpret_cast<uintptr_t>(InitializeCurve),5},
+            {0x4E4423,reinterpret_cast<uintptr_t>(InitializeCurve),5},
+            {0x4E43E3,reinterpret_cast<uintptr_t>(InitializeSelectorState),5},
+            {0x4E44CB,reinterpret_cast<uintptr_t>(InitializeFade),5},
+            {0x4E3D56,reinterpret_cast<uintptr_t>(ResetFacing),6},
+        };
+        return sideEffects[index-kRowReads];
+    }
+    void RedirectBytes(const Redirect& patch, uint8_t bytes[6])
+    {
+        const uint32_t displacement = uint32_t(patch.target - patch.site - 5);
+        bytes[0]=0xE8; std::memcpy(bytes+1,&displacement,4); bytes[5]=0x90;
+    }
+    bool InstallResidentRedirects()
+    {
+        uint8_t original[kRedirects][6]{};
+        size_t applied=0;
+        for (; applied<kRedirects; ++applied)
+        {
+            const auto patch=ResidentRedirect(applied);
+            std::memcpy(original[applied],reinterpret_cast<void*>(patch.site),patch.size);
+            uint8_t bytes[6]; RedirectBytes(patch,bytes);
+            if (!wxl::mem::Patch(reinterpret_cast<void*>(patch.site),bytes,patch.size)) break;
+        }
+        if (applied==kRedirects) return true;
+        while (applied)
+        {
+            const auto patch=ResidentRedirect(--applied);
+            if (!wxl::mem::Patch(reinterpret_cast<void*>(patch.site),original[applied],patch.size))
+                WLOG_ERROR("story-residents: redirect rollback failed at %08x",unsigned(patch.site));
+        }
+        return false;
+    }
     struct Actor { uintptr_t frame = 0, model = 0; uint64_t guid = 0; int index = -1; };
     struct Session
     {
