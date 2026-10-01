@@ -281,8 +281,23 @@ namespace
         uint32_t revision = 0, token = 0;
         float waiting = 0;
         bool placed = false;
+        uintptr_t trialCamera = 0;
+        unsigned cameraDuration = 0;
+        float cameraTime = 0;
     };
     Residents g_residents;
+    void StopCamera(Residents& owner)
+    {
+        if (!owner.trialCamera) return;
+        const auto camera=owner.trialCamera;
+        owner.trialCamera=0; owner.cameraTime=0; owner.cameraDuration=0;
+        const auto frame=owner.members[0].actor.frame;
+        // Do not dereference an old background/model after native replacement.
+        if (frame!=Read<uintptr_t>(off::kFrame) || !frame || Read<uintptr_t>(frame+off::kBackground)!=owner.background) return;
+        wxl::game::Native<void(__fastcall*)(void*,void*,unsigned)>(off::kFrameSetSequence)(reinterpret_cast<void*>(frame),nullptr,0);
+        if (Read<uintptr_t>(frame+off::kFrameCamera)==camera)
+            wxl::game::Native<void(__fastcall*)(void*,void*,unsigned)>(off::kFrameSetCamera)(reinterpret_cast<void*>(frame),nullptr,0);
+    }
     bool LiveResident(const Residents& owner, const Actor& actor)
     {
         // Never dereference captured model pointers after native rows/frame changed.
@@ -305,6 +320,7 @@ namespace
     }
     void StopResidents()
     {
+        StopCamera(g_residents); // relinquish time before native actors/background change
         const Residents old = g_residents;
         g_residents = {}; // invalidate callbacks before restoring native bindings
         if (!old.token) return;
@@ -336,6 +352,29 @@ namespace
         return g_residents.token && Same(Selected(),g_residents.members[0].actor) &&
             LiveResident(g_residents,g_residents.members[0].actor) && LiveResident(g_residents,g_residents.members[1].actor) &&
             Read<uintptr_t>(g_residents.members[0].actor.frame+off::kBackground)==g_residents.background;
+    }
+    const char* BeginCamera(double token, const char* stem, double duration)
+    {
+        if (!g_residents.token || token!=g_residents.token) return "stale-generation";
+        if (!ResidentsValid()) { StopResidents(); return "interrupted"; }
+        if (!g_residents.placed) return "loading";
+        const auto background=g_residents.background, frame=g_residents.members[0].actor.frame;
+        ClipSource source{background}; motion::ClipDiagnostic detail;
+        char model[256]{};
+        if (!stem || !motion::AdmitClip(source,motion::kStand,detail) || !source.Shared(model,sizeof(model)) ||
+            _stricmp(model,stem) || Read<unsigned>(source.header+off::kHeaderCameraCount)!=2 ||
+            !std::isfinite(duration) || duration<=0 || duration!=std::floor(duration) || duration>=detail.record.durationMs)
+            return "camera-unavailable";
+        StopCamera(g_residents);
+        using CameraFn=void*(__fastcall*)(void*,void*,unsigned);
+        const auto original=reinterpret_cast<uintptr_t>(wxl::game::Native<CameraFn>(m2::kGetCameraByIndex)(reinterpret_cast<void*>(background),nullptr,0));
+        const auto trial=reinterpret_cast<uintptr_t>(wxl::game::Native<CameraFn>(m2::kGetCameraByIndex)(reinterpret_cast<void*>(background),nullptr,1));
+        if (!original || !trial || Read<uintptr_t>(frame+off::kFrameCamera)!=original) return "camera-unavailable";
+        wxl::game::Native<void(__fastcall*)(void*,void*,unsigned)>(off::kFrameSetCamera)(reinterpret_cast<void*>(frame),nullptr,1);
+        if (Read<uintptr_t>(frame+off::kFrameCamera)!=trial) return "camera-unavailable";
+        g_residents.trialCamera=trial; g_residents.cameraDuration=unsigned(duration); g_residents.cameraTime=0;
+        wxl::game::Native<void(__fastcall*)(void*,void*,unsigned,unsigned)>(off::kFrameSetSequenceTime)(reinterpret_cast<void*>(frame),nullptr,0,0);
+        return "camera";
     }
     const char* BeginResidents(int index)
     {
@@ -434,6 +473,16 @@ namespace
             resident.remaining-=motion::ClampedDelta(delta);
             if (resident.remaining<=0) { Sequence(resident.actor.model,motion::kStand); resident.clip=motion::kStand; }
         }
+        if (g_residents.trialCamera)
+        {
+            g_residents.cameraTime+=motion::ClampedDelta(delta)*1000;
+            const auto frame=g_residents.members[0].actor.frame;
+            if (g_residents.cameraTime>=g_residents.cameraDuration || Read<uintptr_t>(frame+off::kFrameCamera)!=g_residents.trialCamera)
+                StopCamera(g_residents);
+            else
+                wxl::game::Native<void(__fastcall*)(void*,void*,unsigned,unsigned)>(off::kFrameSetSequenceTime)(
+                    reinterpret_cast<void*>(frame),nullptr,0,unsigned(g_residents.cameraTime));
+        }
         return "ready";
     }
     const char* ActResidents(double token, int index, bool salute)
@@ -459,6 +508,13 @@ namespace
         {
             if (!std::strcmp(action,"stop")) { StopResidents(); status="stock"; }
             else if (!std::strcmp(action,"step")) status=StepResidents(script::ToNumber(lua,3),script::ToNumber(lua,4));
+            else if (!std::strcmp(action,"camera")) status=BeginCamera(script::ToNumber(lua,3),script::ToString(lua,4),script::ToNumber(lua,5));
+            else if (!std::strcmp(action,"camera-stop"))
+            {
+                if (g_residents.token && script::ToNumber(lua,3)==g_residents.token)
+                { StopCamera(g_residents); status="ready"; }
+                else status="stale-generation";
+            }
             else
             {
                 const double requested=script::ToNumber(lua,!std::strcmp(action,"begin") ? 3 : 4);
@@ -473,7 +529,7 @@ namespace
             }
         }
         const bool ok=!std::strcmp(status,"stock") || !std::strcmp(status,"ready") || !std::strcmp(status,"loading") ||
-            !std::strcmp(status,"salute") || !std::strcmp(status,"stand");
+            !std::strcmp(status,"salute") || !std::strcmp(status,"stand") || !std::strcmp(status,"camera");
         script::PushBoolean(lua,ok); script::PushString(lua,status); script::PushNumber(lua,g_residents.token);
         for (const auto& resident : g_residents.members)
         {
@@ -481,7 +537,8 @@ namespace
             if (resident.actor.guid) std::snprintf(guid,sizeof(guid),"%016llx",static_cast<unsigned long long>(resident.actor.guid));
             script::PushString(lua,guid); script::PushNumber(lua,resident.actor.index+1);
         }
-        return 7;
+        script::PushBoolean(lua,g_residents.trialCamera!=0);
+        return 8;
     }
     int Reply(void* lua, bool ok, const char* status, const Actor& actor = {}, const motion::ClipDiagnostic* detail = nullptr)
     {

@@ -13,6 +13,10 @@ namespace wxl::offsets::game::story
     constexpr uintptr_t kSelectCharacter = 0x004E4580;
     constexpr uintptr_t kInitialize = 0x004E3CD0, kLighting = 0x004E3A20;
     constexpr uintptr_t kDetachParent = 0x008274F0;
+    // Original ModelFFX methods; operate on its background, never a roster actor.
+    constexpr uintptr_t kFrameSetCamera = 0x0095F9F0;
+    constexpr uintptr_t kFrameSetSequence = 0x0095F5E0, kFrameSetSequenceTime = 0x0095F610;
+    constexpr size_t kFrameCamera = 0x2A4, kHeaderCameraCount = 0x110;
     constexpr size_t kBackground = 0x2A0, kMount = 0x18C;
     constexpr size_t kRowStride = 0x198, kCustomization = 0x188, kActor = 0x38;
     enum class RowRegister { EAX, EBX, ECX, EDX, ESI };

@@ -46,6 +46,10 @@ extern "C" __declspec(dllexport) const char* __cdecl ActPair(unsigned token, int
 { return ActResidents(token,index,salute!=0); }
 extern "C" __declspec(dllexport) unsigned __cdecl PairToken() { return g_residents.token; }
 extern "C" __declspec(dllexport) void __cdecl StopPair() { StopResidents(); }
+extern "C" __declspec(dllexport) const char* __cdecl CameraPair(unsigned token, const char* stem, unsigned duration)
+{ return BeginCamera(token,stem,duration); }
+extern "C" __declspec(dllexport) void __cdecl StopCameraPair() { StopCamera(g_residents); }
+extern "C" __declspec(dllexport) unsigned __cdecl PairCameraActive() { return g_residents.trialCamera!=0; }
 void __cdecl FixtureRefresh() {}
 extern "C" __declspec(dllexport) void __cdecl RefreshPair()
 { g_refresh=FixtureRefresh; Refresh(); }
