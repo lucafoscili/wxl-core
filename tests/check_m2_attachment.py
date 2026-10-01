@@ -116,6 +116,16 @@ def exercise(client, library):
     passed.append('missing-slot-rejected-or-explicitly-forced')
 
     f = AttachmentFixture(client, library)
+    old = f.model(0)
+    target = f.model(0x2000, live=True, slots=(0xffff,))
+    child = f.model(0x1000)
+    f.call('Attach', child, old, 0, 0)
+    f.call('Attach', child, target, 0, 0)
+    f.detached(child)
+    assert f.get(old + 0x58) == f.get(target + 0x58) == 0
+    passed.append('failed-reparent-drops-old-attachment-but-preserves-owner')
+
+    f = AttachmentFixture(client, library)
     parent = f.model(0)  # native pending-parent path does not dereference the model header
     other = f.model(0x3000)
     a, b, c = (f.model(offset) for offset in (0x1000, 0x2000, 0x4000))

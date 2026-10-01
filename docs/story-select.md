@@ -14,7 +14,8 @@ Attachment takes one child reference. `DetachSlot(parent, slot)` removes every
 matching child and releases those attachment references, preserving a surviving
 row/component owner's reference. A live parent rejects a missing attachment
 lookup unless `force` is explicit; a pending parent has no live lookup yet.
-Reparenting first removes the old attachment. None of this resolves roster
+Reparenting first removes the old attachment, even if the new slot is rejected;
+it does not restore the old parent on failure. None of this resolves roster
 appearance or admits a raw actor pointer after native roster refresh.
 
 `tests/m2_attachment_fixture.cpp` compiles the real SDK wrappers into a separate
