@@ -1,4 +1,4 @@
-// Character skin alpha: the composite-sheet arithmetic, free of client addresses so it can be tested.
+// Character skin alpha: routing, identity and arithmetic, free of client addresses for testing.
 // Copyright (C) 2026 WarcraftXL
 //
 // This program is free software: you can redistribute it and/or modify
@@ -19,6 +19,8 @@
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
+#include <unordered_set>
 #include <vector>
 
 /**
@@ -27,16 +29,47 @@
  * as an overlay (a custom body wearing its own full-resolution skin underneath) needs the sheet
  * transparent wherever no armour landed. These helpers keep that alpha:
  *
- *  - on a custom body's sheet, or from a skin authored WITH alpha, the skin leaves its
- *    region transparent;
- *  - an armour paint keeps the alpha of every pixel whose colour it did not change, so only
- *    the pixels it actually painted become opaque.
- *
- * Stock bodies draw the sheet with opaque materials, which never read its alpha, so neither rule
- * can change how a stock character looks.
+ *  - only on an identified custom body's ARGB sheet, the skin leaves its region transparent;
+ *  - custom armour is painted with TwoPass to recover its own colour and coverage.
+ * Stock and unidentified sheets use one ordinary native paint, without alpha processing.
  */
 namespace wxl::client::skinalpha
 {
+    /// Nestable caller context: a stock call must override a surrounding custom call, then restore it.
+    struct SheetScope
+    {
+        bool& current;
+        bool previous;
+        SheetScope(bool& state, bool custom) : current(state), previous(state) { current = custom; }
+        ~SheetScope() { current = previous; }
+        SheetScope(const SheetScope&) = delete;
+        SheetScope& operator=(const SheetScope&) = delete;
+    };
+
+    /**
+     * Identity captured at native request allocation, before submission to the worker. No component
+     * pointer crosses threads. Cancellation can skip paint; every reuse rebinds the address, and a
+     * paint consumes its mark. Retained cancelled marks are bounded by the native request pool.
+     */
+    class RequestSheets
+    {
+        std::mutex mutex;
+        std::unordered_set<void*> custom;
+    public:
+        void Capture(void* request, bool isCustom)
+        {
+            if (!request) return;
+            std::lock_guard<std::mutex> lock(mutex);
+            custom.erase(request);
+            if (isCustom) custom.insert(request);
+        }
+        bool Consume(void* request, bool argb)
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            return custom.erase(request) != 0 && argb;
+        }
+    };
+
     /**
      * @brief Whether a character model is a custom body rather than a stock race model.
      *
@@ -54,6 +87,9 @@ namespace wxl::client::skinalpha
                 return true;
         return false;
     }
+
+    inline bool IsCustomSheet(const char* pathStem, bool argb)
+    { return argb && IsCustomBody(pathStem); }
 
     /// One composition region on the sheet at level 0: {x, y, width, height}.
     struct Rect
@@ -125,7 +161,7 @@ namespace wxl::client::skinalpha
             });
         }
 
-        /// True when the region was fully opaque, as on every stock character: nothing to keep.
+        /// True when the region was fully opaque: nothing to keep.
         bool Empty() const { return pixels.empty(); }
 
         /// After the paint: a pixel whose colour is unchanged was not painted and keeps its alpha.
@@ -233,4 +269,33 @@ namespace wxl::client::skinalpha
             return out;
         }
     };
+
+    // Shared by the actual hooks and the focused routing regression. Region/resolution callbacks
+    // stay lazy: a stock paint neither reads the sheet nor constructs a TwoPass workspace.
+    template <class Paint, class Region, class Resolution>
+    void PaintRegion(bool custom, uint32_t index, void* source, void** levels,
+                     Paint native, Region findRegion, Resolution resolution)
+    {
+        native(index, source, levels);
+        if (!custom || !source || !levels) return;
+        Rect region;
+        if (findRegion(index, region)) ClearAlpha(levels, resolution(), region);
+    }
+
+    template <class Paint, class Region, class Resolution>
+    void PaintFromOrigin(bool custom, uint32_t index, void* source, void** levels,
+                         Paint native, Region findRegion, Resolution resolution)
+    {
+        if (!custom || !levels) { native(index, source, levels); return; }
+        Rect region;
+        if (!findRegion(index, region)) { native(index, source, levels); return; }
+        thread_local TwoPass exact;
+        exact.Take(levels, resolution(), region);
+        if (!exact.Needed()) { native(index, source, levels); return; }
+        exact.OverBlack();
+        native(index, source, levels);
+        exact.OverWhite();
+        native(index, source, levels);
+        exact.Finish();
+    }
 }

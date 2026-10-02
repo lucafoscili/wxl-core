@@ -1524,6 +1524,13 @@ namespace wxl::offsets::game::m2
     constexpr uintptr_t kCharComposeRequestPaint           = 0x004F0EE0;
     /// uint32: the request's format, copied from the component's when the request starts.
     constexpr size_t kOffComposeRequestFormat              = 0x04;
+    /// Queues one component's appearance. __thiscall, no stack args. Allocates the request, copies
+    /// component+0x14 to request+4, gathers textures, then publishes it under the native queue lock.
+    /// The worker receives no component/model identity, so capture identity before this publishes.
+    constexpr uintptr_t kCharComposeRequestSubmit          = 0x004F1790;
+    /// Request-pool allocation/reuse. __cdecl, no args, returns the request. Its only native caller
+    /// is Submit at 0x004F1794. A cancelled request may skip paint; allocation rebinds every reuse.
+    constexpr uintptr_t kCharComposeRequestAllocate        = 0x004F10E0;
     /// uint32[19]: the chosen geoset id per customization slot, filled by the CCharacterComponent
     /// setters. This array IS the stock client's customization vocabulary; slot 0x11 is substituted
     /// with 1703 when the component's own eye-glow condition holds.

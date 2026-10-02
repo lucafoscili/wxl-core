@@ -1,5 +1,21 @@
 # Focused regression checks
 
+The `wxl-skin-alpha-test` target executes shared production stock/custom paint
+routing, caller scopes, queued identity and pixel arithmetic. The
+[SkinAlpha checkpoint](../src/client/CharModel/README.md#stock-sheet-scope-correction--2-october-2026)
+owns current evidence and the native checklist. Configure Win32 with `CLIENT_PATH`
+empty, build only this target and run `Release/wxl-skin-alpha-test.exe`.
+
+The original request seam fixture is isolated and read-only:
+
+```powershell
+python -B tests/check_skin_alpha_requests.py --client <12340-Wow.exe> --python-deps <existing-pefile-unicorn-directory> --output <offline-output>/native-request-seams.json
+```
+
+It executes native pool reuse/submission, with synthetic gather/lock/signal leaves;
+it does not execute installed detours or render a character. It never launches or
+attaches to WoW. No standalone core DLL from these checks is an install candidate.
+
 The `wxl-story-select-test` target exercises the shared selector Performer:
 clip admission/first-failure diagnostics, zero Walk metadata, the author-chosen
 G1 route, bounded/clamped travel and exact return in the captured scaled basis.

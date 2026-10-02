@@ -43,6 +43,7 @@ namespace
     using SectionWalkFn = void(__fastcall*)(void* component, void* edx);
     /// The composition thread's per-request paint: __cdecl (request).
     using ComposeRequestFn = void(__cdecl*)(void* request);
+    using AllocateRequestFn = void*(__cdecl*)();
 
     PaintRegionFn g_origPaintRegion = nullptr;
     PaintRegionFn g_origPaintFromOrigin = nullptr;
@@ -51,22 +52,17 @@ namespace
     SectionWalkFn g_origPrepSections = nullptr;
     SectionWalkFn g_origUpdateSections = nullptr;
     ComposeRequestFn g_origComposeRequest = nullptr;
+    SectionWalkFn g_origSubmitRequest = nullptr;
+    AllocateRequestFn g_origAllocateRequest = nullptr;
+    sa::RequestSheets g_requestSheets;
 
     /**
      * Whether the sheet being painted on this thread is a custom body's. The painters are not handed
-     * the component, so the three callers that run them mark it: the section walks from the
-     * component's format, the composition thread from the request's copy of it. An uncompressed
-     * format is only ever set by UncompressCustomBody below, so it identifies a custom body.
+     * the component, so section walks identify the body and format. A native queued request carries
+     * no model identity: allocation inside its submission scope captures that decision for the
+     * worker. Format alone is insufficient; stock sheets can also be ARGB with compression off.
      */
     thread_local bool t_customSheet = false;
-
-    struct CustomSheetScope
-    {
-        bool previous;
-        explicit CustomSheetScope(uint32_t format) : previous(t_customSheet)
-        { t_customSheet = format == m2::kGxTexFormatArgb8888; }
-        ~CustomSheetScope() { t_customSheet = previous; }
-    };
 
     uint32_t Field(void* object, size_t offset)
     {
@@ -74,6 +70,12 @@ namespace
     }
 
     using wxl::client::custombody::ModelStem;
+
+    bool CustomSheet(void* component)
+    {
+        return sa::IsCustomSheet(ModelStem(component),
+            Field(component, m2::kOffCharComponentFormat) == m2::kGxTexFormatArgb8888);
+    }
 
     uint32_t SheetResolution()
     {
@@ -91,58 +93,26 @@ namespace
     /**
      * @brief The sheet-covering painter, which paints the base skin (and face and scalp) opaque.
      *
-     * On a custom body's sheet, or from a skin authored with alpha, the skin contributes no
+     * Only on an identified custom body's ARGB sheet, the skin contributes no
      * alpha: after the native paint its region keeps the skin's colour (so armour edges blend
      * against it) at alpha zero, and only armour makes the sheet opaque.
      */
     void __cdecl hkPaintRegion(uint32_t regionIndex, void* source, void** levels)
     {
-        g_origPaintRegion(regionIndex, source, levels);
-        sa::Rect region;
-        if (!source || !levels || !Region(regionIndex, region))
-            return;
-        if (!t_customSheet && *(static_cast<const uint8_t*>(source) + m2::kOffTexEntryAlphaBits) == 0)
-            return;  // Every stock character: nothing to do.
-        sa::ClearAlpha(levels, SheetResolution(), region);
+        sa::PaintRegion(t_customSheet, regionIndex, source, levels,
+                        g_origPaintRegion, Region, SheetResolution);
     }
 
     /**
      * @brief The region-authored painter, which paints armour and other overlays.
      *
-     * The native blits write alpha 255 over their whole rectangle. Pixels whose colour the paint
-     * left unchanged were not painted, so they get their alpha back.
+     * Stock/unidentified sheets remain native. Custom sheets recover armour colour and coverage
+     * with the existing TwoPass algorithm, independently of the hidden skin colour.
      */
     void __cdecl hkPaintFromOrigin(uint32_t regionIndex, void* source, void** levels)
     {
-        thread_local sa::Snapshot snapshot;
-        thread_local sa::TwoPass exact;
-        sa::Rect region;
-        if (!levels || !Region(regionIndex, region))
-        {
-            g_origPaintFromOrigin(regionIndex, source, levels);
-            return;
-        }
-        if (t_customSheet)
-        {
-            // A custom body's armour lies over its own skin: its colour and coverage must be the
-            // armour's alone, not blended with the sheet's hidden skin colour (TwoPass).
-            exact.Take(levels, SheetResolution(), region);
-            if (!exact.Needed())
-            {
-                g_origPaintFromOrigin(regionIndex, source, levels);
-                return;
-            }
-            exact.OverBlack();
-            g_origPaintFromOrigin(regionIndex, source, levels);
-            exact.OverWhite();
-            g_origPaintFromOrigin(regionIndex, source, levels);
-            exact.Finish();
-            return;
-        }
-        snapshot.Take(levels, SheetResolution(), region);
-        g_origPaintFromOrigin(regionIndex, source, levels);
-        if (!snapshot.Empty())
-            snapshot.Restore();
+        sa::PaintFromOrigin(t_customSheet, regionIndex, source, levels,
+                            g_origPaintFromOrigin, Region, SheetResolution);
     }
 
     /**
@@ -181,20 +151,35 @@ namespace
 
     void __fastcall hkPrepSections(void* component, void* edx)
     {
-        CustomSheetScope scope(Field(component, m2::kOffCharComponentFormat));
+        sa::SheetScope scope(t_customSheet, CustomSheet(component));
         g_origPrepSections(component, edx);
     }
 
     void __fastcall hkUpdateSections(void* component, void* edx)
     {
-        CustomSheetScope scope(Field(component, m2::kOffCharComponentFormat));
+        sa::SheetScope scope(t_customSheet, CustomSheet(component));
         g_origUpdateSections(component, edx);
     }
 
     void __cdecl hkComposeRequest(void* request)
     {
-        CustomSheetScope scope(Field(request, m2::kOffComposeRequestFormat));
+        const bool custom = g_requestSheets.Consume(request,
+            Field(request, m2::kOffComposeRequestFormat) == m2::kGxTexFormatArgb8888);
+        sa::SheetScope scope(t_customSheet, custom);
         g_origComposeRequest(request);
+    }
+
+    void __fastcall hkSubmitRequest(void* component, void* edx)
+    {
+        sa::SheetScope scope(t_customSheet, CustomSheet(component));
+        g_origSubmitRequest(component, edx);
+    }
+
+    void* __cdecl hkAllocateRequest()
+    {
+        void* request = g_origAllocateRequest();
+        g_requestSheets.Capture(request, t_customSheet);
+        return request;
     }
 
     /// Before the sheet texture is made, for a component whose model arrived after its init.
@@ -221,6 +206,10 @@ namespace
         wxl::hook::Install("CharUpdateSections", m2::kCharUpdateSections, &hkUpdateSections, &g_origUpdateSections);
         wxl::hook::Install("CharComposeRequestPaint", m2::kCharComposeRequestPaint,
                            &hkComposeRequest, &g_origComposeRequest);
+        wxl::hook::Install("CharComposeRequestSubmit", m2::kCharComposeRequestSubmit,
+                           &hkSubmitRequest, &g_origSubmitRequest);
+        wxl::hook::Install("CharComposeRequestAllocate", m2::kCharComposeRequestAllocate,
+                           &hkAllocateRequest, &g_origAllocateRequest);
         return true;
     }
 }
