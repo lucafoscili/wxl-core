@@ -1,4 +1,4 @@
-// Character skin alpha: keep the composited sheet transparent where a skin authored with alpha shows.
+// Character skin alpha: transparent armour overlays for identified custom bodies.
 // Copyright (C) 2026 WarcraftXL
 //
 // This program is free software: you can redistribute it and/or modify

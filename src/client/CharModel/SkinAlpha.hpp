@@ -75,7 +75,7 @@ namespace wxl::client::skinalpha
      *
      * Stock race and stock-derived models live under Character\. A custom body (a donor) is
      * the only kind that draws the sheet as an overlay on its own skin, so only its sheet needs to
-     * keep alpha; the stock ones keep their compressed sheet.
+     * keep alpha; stock models keep the native compression/format choice.
      */
     inline bool IsCustomBody(const char* pathStem)
     {
