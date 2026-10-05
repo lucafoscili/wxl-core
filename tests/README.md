@@ -560,7 +560,8 @@ python -B tests/check_hover_refresh.py --client <12340-Wow.exe> --fixture <scrat
 
 #### Opt-in passive world-hover trial
 
-**Keep for a reversible Beta experiment; live verdict remains untested.**
+**Delivered experiment failed its live verdict; do not redeploy this policy.**
+The later regression investigation below supersedes the initial offline verdict.
 [HoverPicking.cpp](../src/engine/input/HoverPicking.cpp) owns the one shared
 refresh policy. Build with `WXL_PASSIVE_HOVER_TRIAL=ON` (default OFF); the existing
 composed-runtime producer forwards `--passive-hover-trial` to that option.
@@ -622,5 +623,86 @@ uses the normal build/loader. Generated report is
 `build-hover-evidence/continuation-check.json`, with exact cases and dependency
 versions. The 34 existing source contracts also pass. No installation was run.
 
-The fixture DLL is never an install candidate. Compose the production build
-through the existing runtime producer for the opt-in Beta trial.
+The fixture DLL is never an install candidate. The failed runtime trial was
+composed through the existing runtime producer; it must not be redeployed.
+
+#### Failed live trial: presentation amplification and repeated publication
+
+Luca reported improved temperature but severe hover stalls (FPS around 10), and
+clarified that the tooltip symptom is **one tooltip with stacking information**,
+not two boxes. The [Velora hover checkpoint](../../velora/wow/queued/features/crossover-hover-performance/README.md)
+owns the live verdict and recovery. No replacement runtime is produced here.
+The previous offline ABI/correctness passes did not establish gameplay or callback
+safety: their object header kind `0x200` bypassed native unit presentation, and
+their nested consumer ran inside a forced refresh with its TLS guard already set.
+
+The existing exact-client fixture now executes six additional baseline/trial
+comparisons (**40 total cases pass**) against the unchanged compiled production
+owner. The ordinary shared resolver handles presentation reads as well as actions;
+it cannot identify intent from the `mouseover` token. The actual hooks and native
+hover continuation show this work amplification over 100 frames at 10 ms:
+
+| Presentation reads/frame | Baseline full picks / hover dispatches | Trial full picks / hover dispatches |
+| --- | --- | --- |
+| 1 | 100 / 100 | 101 / 200 |
+| 4 | 100 / 100 | 401 / 500 |
+
+Even re-seeding passive values cannot combine independent forced resolver reads.
+Every such read runs the full synchronous picker and then native cursor/selection
+dispatch; these extra dispatches also execute cursor reset in this fixture.
+There is no cheaper query-only path inside `Refresh()`. The 100 ms interval bounds
+only passive reuse, not resolver work. A genuinely expensive full pick remains
+one synchronous burst whenever the interval expires. This accounts for ways to
+increase or retain stalls; it does not measure Luca's real query frequency or
+prove the duration/cause of his approximately 10 FPS frames.
+
+The unit case uses native object-header kind **9**, dispatch table `0x4F837C`
+(`0x4F82C6 -> 0x4F7A50`) and publisher table `0x51F9C4` (`0x51F889`). Its ordinary
+frame setter `0x4F5980` calls publisher `0x51F790` through `0x51FB60`. The publisher
+writes global GUID at `0x51F82D/0x51F832`, then performs native unit presentation
+selection (`0x621070`) and emits event **0x142** via the real `0x81B530` wrapper.
+Only after the publisher returns does the setter commit the frame GUID at
+`0x4F59C8/0x4F59CF`.
+
+At the event's Lua-dispatch leaf (`0x81AC90`), the fixture models an ordinary
+presentation callback reading `mouseover`. Baseline reads the newly published
+global once and does not pick. Trial `ResolveHook` calls `Refresh()` while
+`g_refreshing` is false: ordinary native publication did not enter that guard.
+The nested fresh pick finds the same unit; the frame still holds the old GUID,
+so its setter republishes the same new GUID. **Baseline has one pick, one native
+unit presentation selection and one event; trial has two of each.** The guard
+limits deeper recursion during the supplemental call, but does not prevent this
+first duplicate. Stack/register checks still pass: this is an ordering/side-effect
+defect, not an ABI return failure.
+
+The unit cursor helper and publisher execute native instructions; synthetic
+cursor state leaves choose a simple inactive-unit path. Lua callback behavior is
+explicitly injected, and tooltip rendering is not implemented. Thus repeated
+native publication is demonstrated under a concrete presentation read, while
+actual stacked tooltip content remains Luca's observed symptom rather than a
+rendered fixture result. Native kind 17 skips this unit-event branch, but custom
+model identity does not establish its object's native kind; no stock/custom
+character cause is inferred from that branch difference.
+
+Input adds another synchronous refresh before subscribers on button-down; the
+existing unhandled world-click pick and native default-action pick remain fresh.
+This can add click work, but it is not a demonstrated cause of passive hovering.
+No interval change fixes the broad resolver or ordinary-publication reentry.
+
+**Smallest sound next experiment, offline first:** use these same cases to test
+one scoped publication guard around the native setter, preserving action freshness
+and asserting one unit event through the presentation callback. Separately replace
+the broad resolver refresh with a proven action dispatch context, so read-only
+tooltip/unit queries never trigger picks. The missing evidence is the concrete
+native spell/macro dispatch boundary that covers `@mouseover` resolution; removing
+the resolver hook without that evidence would restore stale action targeting.
+Keep the direct `InteractUnit` consumer and existing action coverage. Do not ship
+the publication guard alone as a performance fix: four presentation reads would
+still force 401 picks. A candidate needs both the single-publication check and
+baseline-equivalent read-only pick counts before another live trial is useful.
+
+Replay unchanged fixture DLL with the earlier command, setting output to
+`build-hover-evidence/failed-live-diagnosis.json`; dependencies remain the task-local
+path and versions above. The report names baseline/trial scenarios, counts native
+side-effect calls and retains all earlier cases. No runtime source, installed DLL,
+client state or live capture/input was changed for this investigation.

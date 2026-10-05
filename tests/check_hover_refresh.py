@@ -47,7 +47,9 @@ def exercise(client, library, case):
     resident_guids = {new_guid, old_guid, new_guid + 2}
     targeting = 0
     policy = case.get('policy')
+    production_hooks = bool(policy and not case.get('baseline'))
     inject_nested = not policy
+    presentation_depth = 0
 
     def put(address, value): cpu.mem_write(address, struct.pack('<I', value & 0xffffffff))
     def get(address): return struct.unpack('<I', cpu.mem_read(address, 4))[0]
@@ -101,7 +103,7 @@ def exercise(client, library, case):
     cpu.mem_write(0x4fa32e, b'\xe9' + struct.pack('<i', exports['TailHook'] - 0x4fa333) + b'\x90\x90')
     call(exports['SetOriginalTail'], trampoline)
     pick_leaf = memory + 0x28000
-    if policy:
+    if production_hooks:
         def hook(address, length, getter, setter, original):
             saved = bytes(cpu.mem_read(address, length))
             cpu.mem_write(original, saved + b'\xe9' + struct.pack('<i',
@@ -136,13 +138,14 @@ def exercise(client, library, case):
     put(obj + 8, header)
     put(obj + 0xd0, desc)
     put(header, new_guid)
-    put(header + 8, 0x200)  # unknown object kind: native cursor fallback still publishes
+    put(header + 8, case.get('object_kind', 0x200))
     put(vtable + 0xa4, virtual_leaf)
     cpu.mem_write(desc + 0x2d, bytes([0x21 if case.get('special_kind', True) else 0]))
     put(player + 0xb8, desc + 0x100)
     put(0xac80a8, 0)
 
     def dispatch(_, address, size, data):
+        nonlocal presentation_depth
         if address == 0x490770:
             events.append('base-frame-update')
             ret(cleanup=4)
@@ -158,7 +161,7 @@ def exercise(client, library, case):
             ret(targeting if address == 0x7fd620 else 0)
         elif address == 0x5f95d0: ret(controls)
         elif address == 0x715c30: ret()  # no hovered nameplate
-        elif address == (pick_leaf if policy else 0x4f9da0):
+        elif address == (pick_leaf if production_hooks else 0x4f9da0):
             events.append('fresh-pick')
             assert cpu.reg_read(UC_X86_REG_ECX) == frame
             cpu.mem_write(arg(4), struct.pack('<II10f', ray_guid, 0, *([1.0] * 10)))
@@ -175,6 +178,32 @@ def exercise(client, library, case):
         elif address == 0x616800: events.append('cursor-shape'); ret()
         elif address == 0x616920: events.append('cursor-reset'); ret()
         elif address == 0x61b290: ret()
+        elif address == 0x4f7a50:
+            events.append('native-unit-cursor-helper')  # execute real unit helper
+        elif address in (0x6d7aa0, 0x6dd060): ret()  # inactive unit-cursor special states
+        elif address == 0x4883b0: ret(input_)
+        elif address == 0x5143f0:
+            events.append('unit-presentation-reset'); ret()
+        elif address == 0x621070:
+            events.append('unit-presentation-selection'); ret(cleanup=16)
+        elif address == 0x81ac90:
+            # Execute the native 81B530 event wrapper; only its Lua-dispatch leaf
+            # is synthetic. A read here models an ordinary presentation callback,
+            # not an action. The native frame GUID has not been committed yet.
+            assert arg(1) == 0x142 and arg(2) == 0
+            events.append('native-unit-event-142')
+            if case.get('presentation_callback'):
+                assert get(0xbd07a0) == new_guid
+                assert get(frame+0x2c8) == old_guid
+                saved = cpu.context_save()
+                nested_offset = 0xd000 - presentation_depth*0x1000
+                presentation_depth += 1
+                call(0x60abf0, 0xa02e6c, memory+0x29000, 0, stack_offset=nested_offset)
+                presentation_depth -= 1
+                cpu.context_restore(saved)
+            ret()
+        elif address in (0x514080, 0x514050): ret(cleanup=4)
+        elif address == 0x4c74a0: ret()
         elif address in (0x743bc0, 0x743c70): ret(cleanup=4)
         elif address in (0x4f66c0, 0x4f8190):
             events.append(f'native-helper-{address:08x}')  # execute native helper body
@@ -244,7 +273,31 @@ def exercise(client, library, case):
             assert get(0xbd07a0) == guid, (policy, time, hex(get(0xbd07a0)), events)
             assert fresh_count() == picks, (policy, time, fresh_count(), picks)
             checks.append(dict(time=time, guid=guid, freshPicks=picks, cached=bool(cached())))
-        if policy == 'interval-wrap':
+        if policy == 'presentation-amplification':
+            queries = case['queries_per_frame']
+            for i in range(100):
+                call(exports['SetTime'], i*10)
+                call(0x4fa040, 0, this=frame)
+                for _ in range(queries):
+                    call(0x60abf0, 0xa02e6c, memory+0x29000, 0)
+            assert fresh_count() == (100 if case.get('baseline') else 1+100*queries)
+            dispatches = 100 if case.get('baseline') else 100*(1+queries)
+            assert events.count('native-helper-004f8190') == dispatches
+            assert events.count('cursor-reset') == dispatches
+            checks.append(dict(frames=100, presentationQueries=100*queries,
+                freshPicks=fresh_count(), hoverDispatches=events.count('native-helper-004f8190'),
+                cursorResets=events.count('cursor-reset')))
+        elif policy == 'unit-publication-callback':
+            expected_picks = 1 if case.get('baseline') else 2
+            tick(0, new_guid, expected_picks)
+            publications = events.count('native-unit-event-142')
+            assert publications == expected_picks, (case, events)
+            assert events.count('unit-presentation-selection') == publications
+            assert events.count('native-unit-cursor-helper') == publications
+            checks.append(dict(freshPicks=fresh_count(), unitEvents=publications,
+                unitPresentationSelections=publications,
+                frameGuidCommittedAfterCallback=get(frame+0x2c8)==new_guid))
+        elif policy == 'interval-wrap':
             tick(0, new_guid, 1)
             ray_guid = new_guid+2
             tick(16, new_guid, 1); tick(99, new_guid, 1); tick(100, ray_guid, 2)
@@ -379,6 +432,12 @@ def main():
         'world-event', 'key-input', 'passive-cadence', 'mouseover-polling')]
     cases += [dict(name='miss-stays-fresh', policy='miss-stays-fresh', type=0),
               dict(name='cursor-and-focus', policy='cursor-and-focus', type=2)]
+    cases += [dict(name=f'presentation-{queries}-reads-{"baseline" if baseline else "trial"}',
+                  policy='presentation-amplification', type=2, queries_per_frame=queries,
+                  baseline=baseline) for queries in (1, 4) for baseline in (True, False)]
+    cases += [dict(name=f'unit-callback-{"baseline" if baseline else "trial"}',
+                  policy='unit-publication-callback', type=2, object_kind=9,
+                  presentation_callback=True, baseline=baseline) for baseline in (True, False)]
     report = dict(status='offline-native-hover-continuation', executableSha256=digest,
         dependencies={name: importlib.metadata.version(name) for name in ('pefile', 'unicorn')},
         cases=[exercise(args.client, args.fixture, case) for case in cases])
