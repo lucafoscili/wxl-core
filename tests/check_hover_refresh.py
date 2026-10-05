@@ -50,6 +50,7 @@ def exercise(client, library, case):
     production_hooks = bool(policy and not case.get('baseline'))
     inject_nested = not policy
     presentation_depth = 0
+    action_entry = None
 
     def put(address, value): cpu.mem_write(address, struct.pack('<I', value & 0xffffffff))
     def get(address): return struct.unpack('<I', cpu.mem_read(address, 4))[0]
@@ -120,6 +121,8 @@ def exercise(client, library, case):
         hook(0x4fa040, 6, 'FrameAddress', 'SetOriginalFrame', memory+0x28100)
         hook(0x60abf0, 5, 'ResolveAddress', 'SetOriginalResolve', memory+0x28200)
         hook(0x527f00, 7, 'InteractAddress', 'SetOriginalInteract', memory+0x28300)
+        hook(0x4f5980, 6, 'PublicationAddress', 'SetOriginalPublication', memory+0x28400)
+        hook(0x564db0, 9, 'MacroAddress', 'SetOriginalMacro', memory+0x28500)
 
     put(frame + 0xa0, 0 if case.get('no_input') else input_)
     put(input_ + 0x78, 0 if case.get('input_lost') else (
@@ -143,6 +146,10 @@ def exercise(client, library, case):
     cpu.mem_write(desc + 0x2d, bytes([0x21 if case.get('special_kind', True) else 0]))
     put(player + 0xb8, desc + 0x100)
     put(0xac80a8, 0)
+    spell_text = memory+0x30000
+    cpu.mem_write(spell_text, b'!Fixture\0')
+    put(0xbe8d98, 1); put(0xbe6d88, 123)  # one synthetic known spell, no spell-table execution
+    cpu.mem_write(memory+0x31160,b'/cast [@mouseover] !Fixture\0')
 
     def dispatch(_, address, size, data):
         nonlocal presentation_depth
@@ -199,6 +206,13 @@ def exercise(client, library, case):
                 nested_offset = 0xd000 - presentation_depth*0x1000
                 presentation_depth += 1
                 call(0x60abf0, 0xa02e6c, memory+0x29000, 0, stack_offset=nested_offset)
+                for key,entry in (('publication_action',0x527f00),('publication_macro',0x566e80)):
+                    if case.get(key):
+                        preserved={r:cpu.reg_read(r) for r in
+                            (UC_X86_REG_EBX,UC_X86_REG_ESI,UC_X86_REG_EDI,UC_X86_REG_EBP)}
+                        nested_sp=call(entry,controls,stack_offset=nested_offset)
+                        assert cpu.reg_read(UC_X86_REG_ESP)==nested_sp+4
+                        for r,value in preserved.items(): assert cpu.reg_read(r)==value
                 presentation_depth -= 1
                 cpu.context_restore(saved)
             ret()
@@ -219,8 +233,47 @@ def exercise(client, library, case):
             nested_sp = call(0x527f00, controls, stack_offset=0xe000)
             assert cpu.reg_read(UC_X86_REG_ESP) == nested_sp + 4
             cpu.context_restore(saved)
-        elif address == 0x84df60: ret(1)  # InteractUnit's Lua argument is a string
-        elif address == 0x84e0e0: ret(0xa02e6c if arg(2) == 1 else 0x9fc4a0)
+        elif address in (0x84df60, 0x84df20): ret(1)  # synthetic valid Lua argument
+        elif address == 0x84e0e0:
+            if 0x527f00 <= arg(0) < 0x528000:
+                ret(0xa02e6c if arg(2)==1 else 0x9fc4a0)
+            elif action_entry in (0x540310, 0x566400):
+                ret(spell_text if arg(2)==1 else 0xa02e6c)
+            elif action_entry in (0x53e060, 0x5ac000): ret(0xa02e6c)
+            else: ret(0xa02e6c if arg(2) == 1 else 0x9fc4a0)
+        elif address in (0x84e070, 0x84e030): ret(123 if address==0x84e070 else 1)
+        elif address == 0x88b9c0: ret(1)
+        elif address == 0x540200: put(arg(2), 0); ret(123)
+        elif address == 0x80da40:
+            events.append('native-spell-target-consumed')
+            assert arg(3)==expected_guid and arg(4)==0, (case, events, hex(arg(3)))
+            ret()
+        elif address == 0x5abbc0:
+            events.append('native-action-target-consumed')
+            assert get(arg(2))==expected_guid and get(arg(2)+4)==0
+            ret()
+        elif address == 0x565ba0:
+            cpu.mem_write(cpu.reg_read(UC_X86_REG_ECX)+0x160,b'/cast [@mouseover] !Fixture\0')
+            ret()
+        elif address == 0x565b30: ret()
+        elif address == 0x76ed20: ret(cleanup=12)  # synthetic bounded macro text copy
+        elif address == 0x566df0: ret(memory+0x31000)  # synthetic selected macro
+        elif address == 0x6f6020: ret(memory+0x31000,cleanup=8)  # macro-slot lookup leaf
+        elif address == 0x5191c0: ret(1)  # synthetic macro permission leaf
+        elif address == 0x76f1e0:
+            # The native macro executor owns the loop and line dispatch. Text
+            # splitting is synthetic and supplies one line before ending it.
+            cpu.mem_write(arg(2),b'/cast [@mouseover] !Fixture\0')
+            put(arg(1),0)
+            ret(cleanup=20)
+        elif address == 0x81b530 and arg(1)==0x17f:
+            events.append('native-macro-line-dispatch')
+            assert get(0xbd07a0)==expected_guid, (case,events)
+            saved=cpu.context_save()
+            call(0x60abf0,0xa02e6c,memory+0x29000,0,stack_offset=0xc000)
+            assert get(memory+0x29000)==expected_guid
+            cpu.context_restore(saved)
+            ret()
         elif address == 0x76e780:
             left = bytes(cpu.mem_read(arg(1), 32)).split(b'\0', 1)[0]
             right = bytes(cpu.mem_read(arg(2), 32)).split(b'\0', 1)[0]
@@ -280,15 +333,15 @@ def exercise(client, library, case):
                 call(0x4fa040, 0, this=frame)
                 for _ in range(queries):
                     call(0x60abf0, 0xa02e6c, memory+0x29000, 0)
-            assert fresh_count() == (100 if case.get('baseline') else 1+100*queries)
-            dispatches = 100 if case.get('baseline') else 100*(1+queries)
+            assert fresh_count() == (100 if case.get('baseline') else 10)
+            dispatches = 100
             assert events.count('native-helper-004f8190') == dispatches
             assert events.count('cursor-reset') == dispatches
             checks.append(dict(frames=100, presentationQueries=100*queries,
                 freshPicks=fresh_count(), hoverDispatches=events.count('native-helper-004f8190'),
                 cursorResets=events.count('cursor-reset')))
         elif policy == 'unit-publication-callback':
-            expected_picks = 1 if case.get('baseline') else 2
+            expected_picks = 1
             tick(0, new_guid, expected_picks)
             publications = events.count('native-unit-event-142')
             assert publications == expected_picks, (case, events)
@@ -305,16 +358,28 @@ def exercise(client, library, case):
             tick(0xfffffff0, ray_guid, 3)
             ray_guid = new_guid
             tick(0x40, new_guid+2, 3); tick(0x54, new_guid, 4)
-        elif policy in ('interact-action', 'resolver-action', 'mouse-button'):
+        elif policy in ('interact-action', 'spell-name-action', 'spell-id-action', 'use-action',
+                        'macro-action', 'macro-text-action', 'macro-slot-action', 'mouse-button'):
             tick(0, new_guid, 1)
             ray_guid = new_guid+2
             expected_guid = ray_guid
             inject_nested = True
             call(exports['SetTime'], 20)
             if policy == 'interact-action': call(0x527f00, controls)
-            elif policy == 'resolver-action':
-                call(0x60abf0, 0xa02e6c, memory+0x29000, 0)
-                assert get(memory+0x29000) == ray_guid
+            elif policy not in ('mouse-button',):
+                action_entry={'spell-name-action':0x540310,'spell-id-action':0x53e060,
+                              'use-action':0x5ac000,'macro-action':0x566e80,
+                              'macro-text-action':0x566400,'macro-slot-action':0x566dc0}[policy]
+                sp=call(action_entry, *( (1,0) if policy=='macro-slot-action' else (controls,) ))
+                assert cpu.reg_read(UC_X86_REG_ESP)==sp+4
+                for register,value in sentinels.items(): assert cpu.reg_read(register)==value
+                if policy.startswith('macro-'):
+                    assert 'native-macro-line-dispatch' in events
+                elif policy.startswith('spell-'):
+                    assert 'native-spell-target-consumed' in events
+                else:
+                    assert 'native-action-target-consumed' in events
+                action_entry=None
             else: call(exports['BeforeInput'], 0x201)
             assert get(0xbd07a0) == ray_guid and fresh_count() == 2
             assert cached(), 'fresh action result should seed passive presentation'
@@ -382,7 +447,7 @@ def exercise(client, library, case):
                 call(0x4fa040, 0, this=frame)
                 if policy == 'mouseover-polling':
                     call(0x60abf0, 0xa02e6c, memory+0x29000, 0)
-            assert fresh_count() == (10 if policy == 'passive-cadence' else 101)
+            assert fresh_count() == 10
             checks.append(dict(frames=100, freshPicks=fresh_count(),
                                unthrottledPassivePicks=100))
         else: raise AssertionError(policy)
@@ -414,9 +479,27 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if args.python_deps: sys.path.insert(0, str(args.python_deps.resolve()))
+    import pefile
     digest = hashlib.sha256(args.client.read_bytes()).hexdigest()
     assert digest == '1df8ba4be431b5396a27680e44d287c6e364b6ba34b97599deadb18541737ef6'
     assert args.client.resolve().parent not in args.output.resolve().parents
+    executable=pefile.PE(str(args.client))
+    image=executable.get_memory_mapped_image()
+    image_base=executable.OPTIONAL_HEADER.ImageBase
+    def native_word(address): return struct.unpack_from('<I',image,address-image_base)[0]
+    registrations=[('CastSpellByID',0xaccdf0,0x53e060),('CastSpellByName',0xaccde8,0x540310),
+                   ('UseAction',0xacfa18,0x5ac000),('RunMacro',0xace1f8,0x566e80),
+                   ('RunMacroText',0xace200,0x566400)]
+    for name,table,function in registrations:
+        offset=native_word(table)-image_base
+        assert image[offset:offset+len(name)+1]==name.encode()+b'\0'
+        assert native_word(table+4)==function
+    native_calls=[(call,0x60abf0) for call in (0x53e0cb,0x54037b,0x5ac043)]
+    native_calls += [(call,0x564db0) for call in (0x563336,0x56646d,0x566ddb,0x566e9f)]
+    native_calls += [(0x5abdbc,0x566dc0)]
+    for address,target in native_calls:
+        assert image[address-image_base]==0xe8
+        assert (address+5+native_word(address+1)) & 0xffffffff==target
     cases = [dict(name=f'type-{type_}', type=type_) for type_ in range(4)]
     cases += [dict(name=key, type=2, **{key: True}) for key in
               ('input_lost', 'suppressed', 'disappeared', 'no_frame', 'no_input', 'ordinary')]
@@ -426,7 +509,8 @@ def main():
               dict(name='ordinary-ui-unit', type=2, ui_owner=True, ordinary=True),
               dict(name='ordinary-ui-nonunit', type=2, ui_owner=True, ui_unit=False, ordinary=True)]
     cases += [dict(name=name, policy=name, type=2) for name in (
-        'interval-wrap', 'interact-action', 'resolver-action', 'mouse-button',
+        'interval-wrap', 'interact-action', 'spell-name-action', 'spell-id-action',
+        'use-action', 'macro-action', 'macro-text-action', 'macro-slot-action', 'mouse-button',
         'unknown-callers', 'input-loss', 'ui-transition', 'context-loss', 'load-loss',
         'suppression-loss', 'target-mode', 'target-disappearance', 'external-guid',
         'world-event', 'key-input', 'passive-cadence', 'mouseover-polling')]
@@ -438,7 +522,13 @@ def main():
     cases += [dict(name=f'unit-callback-{"baseline" if baseline else "trial"}',
                   policy='unit-publication-callback', type=2, object_kind=9,
                   presentation_callback=True, baseline=baseline) for baseline in (True, False)]
+    cases += [dict(name='unit-callback-nested-interact', policy='unit-publication-callback',
+                   type=2, object_kind=9, presentation_callback=True, publication_action=True)]
+    cases += [dict(name='unit-callback-nested-macro', policy='unit-publication-callback',
+                   type=2, object_kind=9, presentation_callback=True, publication_macro=True)]
     report = dict(status='offline-native-hover-continuation', executableSha256=digest,
+        fixtureSha256=hashlib.sha256(args.fixture.read_bytes()).hexdigest(),
+        nativeActionRegistrations=registrations,nativeActionCalls=native_calls,
         dependencies={name: importlib.metadata.version(name) for name in ('pefile', 'unicorn')},
         cases=[exercise(args.client, args.fixture, case) for case in cases])
     args.output.parent.mkdir(parents=True, exist_ok=True)

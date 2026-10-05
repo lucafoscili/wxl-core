@@ -18,3 +18,7 @@ extern "C" __declspec(dllexport) void __cdecl SetOriginalInteract(void* p) { hov
 extern "C" __declspec(dllexport) void* __cdecl ResolveAddress() { return &hover::ResolveHook; }
 extern "C" __declspec(dllexport) void* __cdecl InteractAddress() { return &hover::InteractHook; }
 extern "C" __declspec(dllexport) void __cdecl BeforeInput(unsigned n) { hover::BeforeInput(n); }
+extern "C" __declspec(dllexport) void __cdecl SetOriginalPublication(void* p) { hover::g_originalSetMouseover=reinterpret_cast<hover::SetMouseoverFn>(p); }
+extern "C" __declspec(dllexport) void* __cdecl PublicationAddress() { return &hover::SetMouseoverHook; }
+extern "C" __declspec(dllexport) void __cdecl SetOriginalMacro(void* p) { hover::g_originalMacro=reinterpret_cast<hover::ExecuteMacroFn>(p); }
+extern "C" __declspec(dllexport) void* __cdecl MacroAddress() { return &hover::MacroHook; }

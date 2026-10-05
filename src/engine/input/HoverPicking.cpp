@@ -21,20 +21,26 @@ namespace wxl::input::hover
     namespace lua = wxl::offsets::engine::lua;
     constexpr uintptr_t kFrameUpdate=off::kFrameLayerUpdate, kHoverContinue=0x4FA05C,
         kPassiveReturn=0x4FA13F, kHoverTail=0x4FA32E, kHoverEpilogue=0x4FA368,
-        kResolveUnit=0x60ABF0, kInteractUnit=0x527F00, kTargetingActive=0x7FD620;
+        kResolveUnit=0x60ABF0, kInteractUnit=0x527F00, kTargetingActive=0x7FD620,
+        kSetMouseover=0x4F5980, kExecuteMacro=0x564DB0;
     constexpr uint32_t kPassiveIntervalMs = 100;
     constexpr unsigned kInputOwnerOffset=0x78, kCursorFlagsOffset=0x31C;
     using FrameUpdateFn = void(__thiscall*)(void*,float);
     using ResolveUnitFn = int(__cdecl*)(const char*,uint32_t*,int);
     using InteractUnitFn = int(__cdecl*)(void*);
+    using SetMouseoverFn = void(__thiscall*)(void*,uint32_t,uint32_t);
+    using ExecuteMacroFn = void(__cdecl*)(void*,const char*);
     off::PickAtScreenFn g_originalPick = nullptr;
     FrameUpdateFn g_originalFrame = nullptr;
     ResolveUnitFn g_originalResolve = nullptr;
     InteractUnitFn g_originalInteract = nullptr;
+    ExecuteMacroFn g_originalMacro = nullptr;
+    SetMouseoverFn g_originalSetMouseover = nullptr;
     void* g_originalTail = nullptr;
     uintptr_t g_hoverContinue=kHoverContinue, g_hoverEpilogue=kHoverEpilogue, g_returnAddress=0;
     bool g_enabled = false;
     __declspec(thread) bool g_refreshing = false;
+    __declspec(thread) unsigned g_publishing = 0;
     // Retain value data (GUID, coordinates/ray, timestamp), never mesh/object/
     // skin/palette pointers. Frame/input identify the GUI context, not geometry.
     struct Retained { bool valid; uint32_t timeMs; void* frame; void* input;
@@ -129,7 +135,7 @@ ordinaryFrame:
     {
         // A nested consumer runs after native publication; it must not erase the
         // fresh result the outer refresh can contribute to passive presentation.
-        if (!g_enabled || g_refreshing) return;
+        if (!g_enabled || g_refreshing || g_publishing) return;
         Invalidate();
         void* frame=*reinterpret_cast<void**>(off::kWorldFrame);
         // UI hover is never delayed. Extra UI Lua replay could invoke an action
@@ -149,7 +155,26 @@ ordinaryFrame:
         return true; // native resolver admits suffixed tokens too
     }
     int __cdecl ResolveHook(const char* token,uint32_t* guid,int flags)
-    { if (MouseoverToken(token)) Refresh(); return g_originalResolve(token,guid,flags); }
+    {
+        // Exact native action argument reads, not Unit*/tooltip/conditional queries.
+        // Registered CastSpellByID, CastSpellByName and UseAction callers all
+        // resolve their target before forwarding it to the action executor.
+        const uintptr_t caller=reinterpret_cast<uintptr_t>(_ReturnAddress());
+        if (MouseoverToken(token) && (caller==0x53E0D0 || caller==0x540380 || caller==0x5AC048)) Refresh();
+        return g_originalResolve(token,guid,flags);
+    }
+    void __fastcall SetMouseoverHook(void* frame,void*,uint32_t lo,uint32_t hi)
+    {
+        // Native publication exposes the new global before committing frame GUID.
+        // Keep callbacks inside that whole transaction from starting it again.
+        ++g_publishing; g_originalSetMouseover(frame,lo,hi); --g_publishing;
+    }
+    void __cdecl MacroHook(void* macro,const char* button)
+    {
+        // Shared native executor used by RunMacro/Text and the action-slot route.
+        // Publish before it dispatches the first macro line/conditional to Lua.
+        Refresh(); g_originalMacro(macro,button);
+    }
     int __cdecl InteractHook(void* state)
     {
         const char* token=reinterpret_cast<lua::LuaToStringFn>(lua::kLuaToString)(state,1,nullptr);
@@ -174,16 +199,29 @@ ordinaryFrame:
         constexpr uint8_t prologue[]={0x55,0x8B,0xEC,0x83,0xEC,0x3C};
         constexpr uint8_t tail[]={0xD9,0x45,0x08,0x51,0xD9,0x1C,0x24};
         constexpr uint8_t epilogue[]={0x5F,0x5E,0x5B,0x8B,0xE5,0x5D,0xC2,0x04,0x00};
+        constexpr uint8_t setter[]={0x55,0x8B,0xEC,0x83,0xEC,0x10};
+        constexpr uint8_t macro[]={0x55,0x8B,0xEC,0x81,0xEC,0x04,0x04,0x00,0x00};
         if (std::memcmp(reinterpret_cast<void*>(kFrameUpdate),prologue,sizeof(prologue))
             || std::memcmp(reinterpret_cast<void*>(kHoverTail),tail,sizeof(tail))
-            || std::memcmp(reinterpret_cast<void*>(kHoverEpilogue),epilogue,sizeof(epilogue)))
+            || std::memcmp(reinterpret_cast<void*>(kHoverEpilogue),epilogue,sizeof(epilogue))
+            || std::memcmp(reinterpret_cast<void*>(kSetMouseover),setter,sizeof(setter))
+            || std::memcmp(reinterpret_cast<void*>(kExecuteMacro),macro,sizeof(macro)))
         { WLOG_WARN("passive-hover: native continuation ABI mismatch; trial inactive"); return false; }
+        // These are complete relative call instructions at the admitted action
+        // argument boundaries. Unknown client bytes leave this trial inactive.
+        constexpr uintptr_t actionCalls[]={0x53E0CB,0x54037B,0x5AC043};
+        for (uintptr_t call : actionCalls)
+            if (*reinterpret_cast<const uint8_t*>(call)!=0xE8
+                || call+5+*reinterpret_cast<const int32_t*>(call+1)!=kResolveUnit)
+            { WLOG_WARN("passive-hover: native action boundary mismatch; trial inactive"); return false; }
         namespace hook=wxl::hook;
         const bool ok=hook::Install("HoverTail",kHoverTail,reinterpret_cast<void*>(&TailHook),&g_originalTail)
             && hook::Install("HoverPick",off::kPickAtScreen,reinterpret_cast<void*>(&PickHook),reinterpret_cast<void**>(&g_originalPick))
             && hook::Install("HoverFrame",kFrameUpdate,reinterpret_cast<void*>(&FrameHook),reinterpret_cast<void**>(&g_originalFrame))
             && hook::Install("HoverUnitToken",kResolveUnit,&ResolveHook,&g_originalResolve)
-            && hook::Install("HoverInteract",kInteractUnit,&InteractHook,&g_originalInteract);
+            && hook::Install("HoverInteract",kInteractUnit,&InteractHook,&g_originalInteract)
+            && hook::Install("HoverPublication",kSetMouseover,reinterpret_cast<void*>(&SetMouseoverHook),reinterpret_cast<void**>(&g_originalSetMouseover))
+            && hook::Install("HoverMacro",kExecuteMacro,&MacroHook,&g_originalMacro);
         if (!ok) return false;
         namespace ev=wxl::events;
         ev::Subscribe(ev::Event::OnWorldLeave,OnInvalidation,nullptr);

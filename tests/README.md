@@ -706,3 +706,63 @@ Replay unchanged fixture DLL with the earlier command, setting output to
 path and versions above. The report names baseline/trial scenarios, counts native
 side-effect calls and retains all earlier cases. No runtime source, installed DLL,
 client state or live capture/input was changed for this investigation.
+
+#### Publication guard and action-only refresh successor — 5 October 2026
+
+**Offline candidate; default OFF, not installed or accepted.** The same
+`HoverPicking.cpp` owner now scopes refresh suppression to the native setter
+`0x4F5980` until its frame-GUID commit returns. The setter and publisher still
+execute once normally; no GUID write, event suppression or replacement publisher
+was introduced. A nested action at the native unit event sees the already
+published target without recursively picking or notifying it again.
+
+The resolver hook refreshes only mouseover arguments at three exact native
+action return addresses. Every other resolver caller forwards without a pick:
+
+| Registered action | Native resolver call → return |
+| --- | --- |
+| `CastSpellByID` (`0x53E060`) | `0x53E0CB → 0x53E0D0` |
+| `CastSpellByName` (`0x540310`) | `0x54037B → 0x540380` |
+| `UseAction` (`0x5AC000`) | `0x5AC043 → 0x5AC048` |
+
+The shared native macro executor `0x564DB0` refreshes before its first line is
+dispatched as event `0x17F`, so macro conditionals start from current world
+selection without making `SecureCmdOptionParse` or tooltip reads refresh paths.
+It is reached by `RunMacroText` at `0x56646D`, `RunMacro` at `0x566E9F`, and
+the macro-slot wrapper at `0x566DDB`. Native `UseAction` reaches that wrapper
+at `0x5ABDBC`; the fourth direct executor call is `0x563336`. The existing
+direct `InteractUnit` and mouse-button refresh remain. Each macro execution
+refreshes even when its text has no mouseover; it does not parse or rewrite text.
+Spell execution within a macro can perform another fresh action pick.
+
+The existing fixture pins all five action registrations and these call bytes
+against the same exact 12340 executable. **47 compiled/native cases pass**:
+native spell-by-name/id and action-slot functions consume the freshly published
+GUID; native RunMacro/Text/slot functions enter the shared executor and dispatch
+their first line after publication; nested unit-event reads, interaction and
+macro execution each produce one pick/notification and restore the stack and
+callee-saved registers. Existing type dispatch, eligibility loss, input/UI,
+native fallback, 100 ms/wrap and fresh-action cache-seeding cases still pass.
+
+| Ordinary reads/frame over 100 frames | Baseline picks/dispatches | Successor picks/dispatches |
+| --- | --- | --- |
+| 1 | 100 / 100 | 10 / 100 |
+| 4 | 100 / 100 | 10 / 100 |
+
+Replay with the earlier fixture command, using `build-hover-evidence/hover-action.dll`
+and report `build-hover-evidence/hover-action-check.json`. The opt-in Win32
+`WarcraftXL` target also builds with empty `CLIENT_PATH`; this standalone DLL is
+compile evidence, not a retained Velora composition or install candidate.
+No physics, equipment, capacity, geometry, interval or default-enable change.
+
+Stock FrameXML corroborates the dispatch route: `SecureTemplates.lua` from
+`patch-enUS-2.MPQ` (SHA256 `18e855a2…`) invokes CastSpellByName at line 339 and
+RunMacro/Text at 373/378; `ChatFrame.lua` from `patch-enUS-3.MPQ` (SHA256
+`2506a6ec…`) parses `/cast` options then calls CastSpellByName at 1029–1036.
+Those are read-only archive observations, not an executed Lua test. Geometry,
+object residency, cursor leaves, Lua arguments, macro splitting/line event and
+spell execution leaves remain synthetic. Real addon callbacks outside the
+post-publication unit event, hook installation, macro outcomes, rendered tooltip,
+CPU/FPS/thermal behavior and the duration of each actual pick need native review.
+This source candidate does not establish freshness for arbitrary direct Lua
+unit-action APIs outside the admitted spell/action/macro/InteractUnit boundaries.
