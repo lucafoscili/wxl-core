@@ -277,3 +277,79 @@ fill change does not change native triangle decisions, visibility filtering,
 chunking, nearest-depth arbitration or the existing >65K crash protection.
 Native acceptance and the broader low-vertex hover cost remain open evidence
 questions for the delivery owner.
+
+
+### Complete warm geometry dispatch - 5 October 2026
+
+The same exporter now captures native geometry at `0x81DAF0` and the upstream
+`EndHitTest` listing at `0x81DF10`, preserving their hashes in the manifest. The
+fixture's `--dispatch` mode executes the captured geometry dispatcher through
+actual generated registry, current-source/current-call, frame, section preparation,
+fill and triangle-hook bodies. The parsed skin struct is generated from the SDK
+owner, with its native size/section offset asserted. Logging output, native calls
+and the CPU-feature address are boundary redirects; the actual logging budget,
+visibility/material filters and hook decisions remain in the compiled bodies.
+Scratch is preallocated to 65,536 positions; reaching the unavailable native
+allocator aborts the fixture. Thus these are **complete warm geometry-call** costs,
+not cold allocation, broad-phase scene search, actual game FPS or a whole-frame
+profile. Shared-conversion admission scans immutable topology on rebuild, rather
+than on each geometry call, and is not part of this warm timer.
+
+```powershell
+<scratch>/picking_benchmark.exe <scratch> --dispatch installed-tifa installed-elene tifa kasumi ayane shadowheart luna human-female
+```
+
+The executable runs five native filter checks per mesh (hidden sections, global
+alpha zero, no-pick, nonzero material layer and disabled material visibility),
+requiring no filler/triangle calls and preserving an existing hit/depth. Every
+large fixture explicitly requires the real `PickingNote` and
+`CurrentPickingSource` to admit its live header/skin/IB/source identities. A
+rebuild during the first chunk preserves exactly the captured kernel's genuine
+prefix; a changed preparation epoch stops the section at the same prefix. The
+geometry scope restores its predecessor link. Timings use all visible material
+alpha one, a synthetic fixed camera-space bone palette/view, mode zero, a fixed
+point and 200 calls. This setup does not represent live Deck visibility or poses. Comparing one versus 64 registry entries bounds registry search cost.
+The kernel-disabled run still executes all native dispatch, live position fill,
+validation, index rebasing and currency checks; only the triangle predicate is
+replaced by a no-op that preserves the current hit. A separate actual
+`TestPickingSection` loop with that no-op measures the admitted topology path.
+
+| Mesh | Warm geometry | Without triangle kernel | Validation/rebase/currency only |
+| --- | ---: | ---: | ---: |
+| Installed Tifa | 3.010 ms | 1.794 ms | 0.129 ms |
+| Installed Elene | 1.622 ms | 0.689 ms | 0.079 ms |
+| Kasumi | 1.048 ms | 0.395 ms | legacy path |
+| Ayane | 0.894 ms | 0.327 ms | legacy path |
+| Shadowheart | 0.970 ms | 0.356 ms | legacy path |
+| Stock HumanFemale | 0.106 ms | 0.042 ms | legacy path |
+
+All eight inputs have exactly one layer-zero, pickable batch per section;
+there is no repeated section fill to remove inside a geometry call. Registry
+capacity adds only small/noisy differences. The admitted topology work is about
+4-5% of total geometry time; removing it cannot address the dominant crossover
+cost. The first diagnostic high-mesh pass used legacy dispatch because its
+boundary header count was omitted; explicit admission assertions caught that
+fixture error. The table contains the corrected admitted pass.
+
+`EndHitTest` calls geometry once per admitted scene candidate in mode zero. When
+no hit is returned and the caller permits it, it repeats candidates in mode one
+(normal-expanded surfaces). It stops after a genuine hit. Misses can therefore
+legitimately cost two geometry passes. Actual broad-phase candidate multiplicity
+and retry frequency are unmeasured here. The fixed-point timer measures per-call
+work; it does not reproduce the reported worst case of walking/running while
+hovering, nor establish a thermal or FPS delta.
+
+**Defer another runtime edit.** Dominant work is current-palette skinning and
+native triangle testing. A next exact-algorithm question is whether a conservative
+animated section bound can reject a ray before skinning, without losing any real
+hit. The SDK exposes current model/split-body/region bounds, but no verified
+contract maps them to every SKIN section, including custom weights, garments and
+procedural physics. Static section/model bounds do not establish that animated
+coverage. Verify that contract before using an existing bound. If no such bound
+exists, a live projected section bound after filling is a narrower experiment:
+it can reduce triangle work while retaining fresh positions, but still needs
+conservative floating-point/fallback correctness and a measured benefit. A
+lower-detail picking proxy is a separate content/interaction decision: it changes
+selectable silhouette/detail and needs explicit behavior acceptance; it is not an
+exact optimization of the current picker. No new bounds, cache, proxy or throttle
+is implemented by this diagnostic.

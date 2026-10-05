@@ -9,6 +9,7 @@
 #include <cmath>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -43,6 +44,35 @@ PickingCall* PickingFillCall(void* scene,void* instance,void* skin) {
 }
 struct FillChain { Fill fillNext[3]; } g_wideSkins;
 #include "fill-hook.generated.hpp"
+#define WLOG_WARN(...) ((void)0)
+#define WLOG_INFO(...) ((void)0)
+namespace wxl::log { void Flush() {} }
+namespace full {
+#include "dispatch.generated.hpp"
+static_assert(sizeof(M2SkinProfile)==0x30 && offsetof(M2SkinProfile,submeshes)==0x20);
+}
+// Only the native allocator boundary is unavailable offline; warm runs must not reach it.
+void __cdecl UnexpectedAllocation() { std::abort(); }
+int __fastcall NoTriangles(void*,void*,uint16_t*,uint16_t*,int,float*,int,int,float*,int hit) {return hit;}
+Native observedKernel=nullptr;
+Fill observedFillEntries[3]={};unsigned observedFills=0,observedTriangles=0;
+full::WideSkinNote* invalidateNote=nullptr;
+full::PickingCall* reprepareCall=nullptr;
+int prefixHit=0;float prefixDepth=0;
+template<unsigned F> void __fastcall ObserveFill(void* scene,void* edx,void* instance,void* skin,
+                                               void* section,int mode,float* projection,float distance) {
+    ++observedFills;observedFillEntries[F](scene,edx,instance,skin,section,mode,projection,distance);
+}
+int __fastcall ObserveTriangles(void* scene,void* edx,uint16_t* begin,uint16_t* end,int base,
+                                float* point,int mode,int candidate,float* depth,int hit) {
+    ++observedTriangles;int result=observedKernel(scene,edx,begin,end,base,point,mode,candidate,depth,hit);
+    if(observedTriangles==1) {
+        prefixHit=result;prefixDepth=*depth;
+        if(invalidateNote)++invalidateNote->pickingGeneration;
+        if(reprepareCall)++reprepareCall->prepareEpoch;
+    }
+    return result;
+}
 unsigned nativeCalls=0;
 Fill forwardedNative=nullptr;void* forwardedSkin=nullptr;
 bool executeForward=true;
@@ -110,6 +140,7 @@ Result run(Native native, std::vector<Section>& sections, float* point, bool fil
 }
 int main(int argc,char** argv) {
     assert(argc>=3 && sizeof(void*)==4);
+    const bool dispatchOnly=std::string(argv[2])=="--dispatch";
     auto bytes=read(std::string(argv[1])+"/native.bin"); assert(bytes.size()==0x16c);
     float epsilon; std::memcpy(&epsilon,bytes.data()+0x168,4);
     auto* executable=(char*)VirtualAlloc(nullptr,0x1000,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
@@ -136,12 +167,36 @@ int main(int argc,char** argv) {
     }
     Fill fill=(Fill)(fillerCode+0x81d680-0x81d2c0);
     nativeFillers=fillerCode;
+    auto geometryBytes=read(std::string(argv[1])+"/geometry.bin");
+    assert(geometryBytes.size()==0x25b && geometryBytes[0x258]=='\xc2');
+    auto* geometry=(char*)VirtualAlloc(nullptr,0x1000,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
+    assert(geometry);std::memcpy(geometry,geometryBytes.data(),geometryBytes.size());
+    auto redirect=[&](uint32_t address,uintptr_t target) {
+        unsigned offset=address-0x81daf0;assert(geometry[offset]=='\xe8');
+        int32_t relative=(int32_t)(target-(uintptr_t)(geometry+offset+5));
+        std::memcpy(geometry+offset+1,&relative,4);
+    };
+    redirect(0x81dc23,(uintptr_t)UnexpectedAllocation);redirect(0x81dc88,(uintptr_t)UnexpectedAllocation);
+    redirect(0x81dc9f,(uintptr_t)UnexpectedAllocation);
+    redirect(0x81dccf,(uintptr_t)full::hkFillPickingVertices<2>);
+    redirect(0x81dcdf,(uintptr_t)full::hkFillPickingVertices<0>);
+    redirect(0x81dce6,(uintptr_t)full::hkFillPickingVertices<1>);
+    redirect(0x81dd19,(uintptr_t)full::hkSceneTriangleHitTest);
+    uint32_t cpuFlags=4,oldCpuAddress=0xd3fcec,cpuAddress=(uint32_t)&cpuFlags,cpuRelocations=0;
+    for(unsigned i=0;i<geometryBytes.size()-3;++i)if(std::memcmp(geometry+i,&oldCpuAddress,4)==0) {
+        std::memcpy(geometry+i,&cpuAddress,4);++cpuRelocations;
+    }
+    assert(cpuRelocations==1);
+    full::g_wideSkins.geometryNext=(off::M2_HitTestGeometryFn)geometry;
+    full::g_wideSkins.fillNext[0]=fill;
+    full::g_wideSkins.fillNext[1]=(Fill)(fillerCode+0x570);
+    full::g_wideSkins.fillNext[2]=(Fill)(fillerCode+0x700);
     float special[9]={0,0,1, 1,0,1, 0,1,1}, edge[2]={0.5f,0.5f};
     assert(PickingTriangleMayCover(special,0,1,2,edge));
     float outside[2]={2,2}; assert(!PickingTriangleMayCover(special,0,1,2,outside));
     special[0]=std::numeric_limits<float>::quiet_NaN();
     assert(PickingTriangleMayCover(special,0,1,2,outside));
-    for(int file=2;file<argc;++file) {
+    for(int file=dispatchOnly?3:2;file<argc;++file) {
         auto blob=read(std::string(argv[1])+"/"+argv[file]+".bin"); size_t at=0;
         auto u32=[&](){uint32_t v;std::memcpy(&v,blob.data()+at,4);at+=4;return v;};
         unsigned n=u32(); std::vector<Section> sections;
@@ -183,6 +238,114 @@ int main(int argc,char** argv) {
         *(void**)(instance+0x98)=palette;
         std::vector<float> scratch(65536*3);Scene fillScene;fillScene.points=scratch.data();
         ((M2Header*)header)->bones.count=256;
+        ((M2Header*)header)->vertices.count=(uint32_t)(vertices.size()/48);
+        if(dispatchOnly) {
+            auto sectionBytes=read(std::string(argv[1])+"/"+argv[file]+".sections");
+            auto batchBytes=read(std::string(argv[1])+"/"+argv[file]+".batches");
+            auto indexBytes=read(std::string(argv[1])+"/"+argv[file]+".indices");
+            full::M2SkinProfile nativeSkin={};nativeSkin.vertexCount=(uint32_t)(lookup.size()/2);
+            nativeSkin.vertexLookup=(uint16_t*)lookup.data();nativeSkin.indices=(uint16_t*)indexBytes.data();
+            nativeSkin.indexCount=(uint32_t)(indexBytes.size()/2);
+            nativeSkin.submeshes=(M2SkinSection*)sectionBytes.data();nativeSkin.submeshCount=(uint32_t)(sectionBytes.size()/48);
+            nativeSkin.batches=(wxl::structure::m2::M2Batch*)batchBytes.data();nativeSkin.batchCount=(uint32_t)(batchBytes.size()/24);
+            *(void**)(model+0x170)=&nativeSkin;
+            *(void**)(model+off::kOffSharedIndexBuf)=model; // stable live IB identity, never followed
+            std::vector<uint32_t> visible(nativeSkin.submeshCount,1),materials(65536,0);
+            std::vector<uint16_t> weights(65536,0);float alpha[3]={1,1,1};
+            *(void**)(instance+0x9c)=visible.data();*(float*)(instance+0x19c)=1;
+            *(void**)(instance+0xa8)=alpha;*(void**)(header+0x94)=weights.data();
+            *(void**)(header+0x74)=materials.data();
+            // View-space camera rotation: model Z maps to screen Y, depth = 10 - model Y.
+            for(unsigned b=0;b<256;++b) {
+                float* m=palette+b*16;m[5]=m[10]=0;m[6]=-1;m[9]=1;m[14]=10;
+            }
+            float projection[3]={0,0,1},point[2]={(minx+maxx)*0.5f,(miny+maxy)*0.5f};
+            double fullTime[2]={},withoutTriangles=0,topologyTime=0;volatile int sink=0;
+            for(unsigned registry=0;registry<2;++registry) {
+                full::g_wideSkins={};full::g_wideSkinCount=registry?64:1;
+                auto& note=full::g_wideSkins[full::g_wideSkinCount-1];
+                note.skin=&nativeSkin;note.indices=nativeSkin.indices;note.indexCount=nativeSkin.indexCount;
+                note.vertexCount=nativeSkin.vertexCount;
+                if(nativeSkin.vertexCount>65536) {
+                    note.model=model;note.convertedSharedIb=model;note.pickingGeneration=1;
+                    note.pickingSource={(M2Header*)header,(uint32_t)vertices.data(),(uint32_t)(vertices.size()/48),
+                                        nativeSkin.submeshes,nativeSkin.submeshCount,nativeSkin.vertexLookup};
+                    assert(full::PickingNote(instance)==&note && full::CurrentPickingSource(note,instance));
+                }
+                full::g_wideSkins.geometryNext=(off::M2_HitTestGeometryFn)geometry;
+                full::g_wideSkins.fillNext[0]=fill;full::g_wideSkins.fillNext[1]=(Fill)(fillerCode+0x570);
+                full::g_wideSkins.fillNext[2]=(Fill)(fillerCode+0x700);
+                full::g_origTriangleHitTest=native;
+                auto invoke=[&]() {float depth=10000;return full::hkHitTestGeometry(&fillScene,nullptr,instance,0,
+                                                       projection,0,point,1,&depth,0);};
+                if(!registry) {
+                    observedKernel=native;observedTriangles=observedFills=0;
+                    observedFillEntries[0]=fill;observedFillEntries[1]=(Fill)(fillerCode+0x570);
+                    observedFillEntries[2]=(Fill)(fillerCode+0x700);
+                    full::g_wideSkins.fillNext[0]=ObserveFill<0>;full::g_wideSkins.fillNext[1]=ObserveFill<1>;
+                    full::g_wideSkins.fillNext[2]=ObserveFill<2>;full::g_origTriangleHitTest=ObserveTriangles;
+                    auto noHit=[&]() {
+                        observedTriangles=observedFills=0;float depth=0.25f;
+                        int hit=full::hkHitTestGeometry(&fillScene,nullptr,instance,0,projection,0,point,7,&depth,3);
+                        assert(hit==3 && depth==0.25f && !observedTriangles && !observedFills && !note.pickingCall);
+                    };
+                    // Actual native filters: hidden geometry, disabled global alpha, no-pick,
+                    // secondary material layer and material filtering all avoid both kernels.
+                    std::fill(visible.begin(),visible.end(),0);noHit();std::fill(visible.begin(),visible.end(),1);
+                    *(float*)(instance+0x19c)=0;noHit();*(float*)(instance+0x19c)=1;
+                    auto batchOriginal=batchBytes;
+                    for(unsigned b=0;b<nativeSkin.batchCount;++b)nativeSkin.batches[b].flags|=8;
+                    noHit();std::memcpy(batchBytes.data(),batchOriginal.data(),batchBytes.size());
+                    for(unsigned b=0;b<nativeSkin.batchCount;++b)nativeSkin.batches[b].materialLayer=1;
+                    noHit();std::memcpy(batchBytes.data(),batchOriginal.data(),batchBytes.size());
+                    *(uint32_t*)(instance+0x2d4)=2;noHit();*(uint32_t*)(instance+0x2d4)=0;
+                    observedTriangles=observedFills=0;invoke();assert(observedTriangles && !note.pickingCall);
+                    if(nativeSkin.vertexCount>65536) {
+                        // A rebuild during the first chunk keeps exactly the genuine prefix.
+                        observedTriangles=0;invalidateNote=&note;float depth=10000;
+                        int hit=full::hkHitTestGeometry(&fillScene,nullptr,instance,0,projection,0,point,1,&depth,0);
+                        assert(observedTriangles==1 && hit==prefixHit && std::memcmp(&depth,&prefixDepth,4)==0);
+                        assert(!note.pickingCall);invalidateNote=nullptr;
+                        // A re-preparation epoch stops this section before a later chunk.
+                        full::PickingCall call={&note,&fillScene,instance,&nativeSkin,note.pickingSource,note.pickingGeneration,
+                                                 0,projection,0,point,1,&depth};
+                        for(unsigned s=0;s<nativeSkin.submeshCount;++s)if(nativeSkin.submeshes[s].indexCount>3072) {
+                            call.section=nativeSkin.submeshes[s];call.sectionIndex=s;
+                            call.triangleStart=full::TriangleStart(call.section,nativeSkin);break;
+                        }
+                        assert(call.section.indexCount>3072);depth=10000;observedTriangles=0;reprepareCall=&call;
+                        hit=full::TestPickingSection(call,nullptr,point,0,1,&depth,0);
+                        assert(observedTriangles==1 && hit==prefixHit && std::memcmp(&depth,&prefixDepth,4)==0);
+                        reprepareCall=nullptr;
+                    }
+                    full::g_wideSkins.fillNext[0]=fill;full::g_wideSkins.fillNext[1]=(Fill)(fillerCode+0x570);
+                    full::g_wideSkins.fillNext[2]=(Fill)(fillerCode+0x700);full::g_origTriangleHitTest=native;
+                }
+                invoke();auto started=std::chrono::steady_clock::now();
+                for(unsigned repeat=0;repeat<200;++repeat)sink+=invoke();
+                fullTime[registry]=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()/200;
+                if(!registry) {
+                    full::g_origTriangleHitTest=NoTriangles;started=std::chrono::steady_clock::now();
+                    for(unsigned repeat=0;repeat<200;++repeat)sink+=invoke();
+                    withoutTriangles=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()/200;
+                    if(nativeSkin.vertexCount>65536) {
+                        full::PickingCall call={&note,&fillScene,instance,&nativeSkin,note.pickingSource,note.pickingGeneration,
+                                                 0,projection,0,point,1,nullptr};
+                        float depth=10000;call.bestDepth=&depth;
+                        started=std::chrono::steady_clock::now();
+                        for(unsigned repeat=0;repeat<200;++repeat)for(unsigned s=0;s<nativeSkin.submeshCount;++s) {
+                            call.section=nativeSkin.submeshes[s];call.sectionIndex=s;
+                            call.triangleStart=full::TriangleStart(call.section,nativeSkin);
+                            sink+=full::TestPickingSection(call,nullptr,point,0,1,&depth,0);
+                        }
+                        topologyTime=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()/200;
+                    }
+                }
+            }
+            std::printf("%s fullRegistry1=%.4fms fullRegistry64=%.4fms noTriangleKernel=%.4fms topologyValidationRebaseCurrency=%.4fms batches=%u sections=%u\n",
+                        argv[file],fullTime[0],fullTime[1],withoutTriangles,topologyTime,nativeSkin.batchCount,nativeSkin.submeshCount);
+            continue;
+        }
         float projection[3]={0,1,0};double fillTime=0,denseTime=0;unsigned upper=0;
         auto fillStart=std::chrono::steady_clock::now();
         for(unsigned repeat=0;repeat<100;++repeat)for(auto& s:sections) {

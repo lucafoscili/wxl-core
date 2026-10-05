@@ -1,7 +1,7 @@
 """Export read-only real M2/SKIN geometry and the actual 12340 triangle predicate.
 
-No client process is launched. The x86 fixture relocates only the predicate's
-absolute epsilon load; all instructions and relative branches stay unchanged.
+No client process is launched. The x86 fixture relocates external native addresses
+and redirects call boundaries while retaining the captured instruction bodies.
 """
 import argparse
 import hashlib
@@ -31,6 +31,8 @@ def export(client, pairs, output):
     (output/'fillers.bin').write_bytes(read_va(0x81d2c0, 0x830))
     (output/'transform.bin').write_bytes(read_va(0x4c21b0, 0x5d))
     (output/'blend-scale.bin').write_bytes(read_va(0xa45564, 4))
+    (output/'geometry.bin').write_bytes(read_va(0x81daf0, 0x25b))
+    (output/'end-hit-test.bin').write_bytes(read_va(0x81df10, 0x1fb))
     source = Path(__file__).parents[1]/'src/client/CM2Shared/WideIndices.cpp'
     text = source.read_text()
     begin = text.index('    bool RefillPickingPositions(')
@@ -45,20 +47,53 @@ def export(client, pairs, output):
             last += 1
         if text[last:last+1] == ';': last += 1
         return text[first:last]+'\n'
+    def statement(marker):
+        first=text.index(marker)
+        return text[first:text.index(';',first)+1]+'\n'
     (output/'types.generated.hpp').write_text(declaration('    struct PickingSource\n')+
         declaration('    enum class PickingReject')+declaration('    struct PickingCall\n'))
     (output/'prepare.generated.hpp').write_text(declaration('    bool WideVertexStart(')+
         declaration('    window::SectionPlacement Placement(')+declaration('    uint32_t TriangleStart(')+
         declaration('    void PreparePickingSection(')+declaration('    void PrepareLegacySection('))
     (output/'fill-hook.generated.hpp').write_text(declaration('    template <unsigned Filler>\n'))
+    # The complete warm geometry path uses the actual parsed-skin ABI and registry/currency
+    # checks. No substitute admission/preparation/dispatch implementation is benchmarked.
+    skin_text=(source.parents[2]/'game/M2.hpp').read_text()
+    skin_first=skin_text.index('    struct M2SkinProfile\n')
+    skin_last=skin_text.index('\n#pragma pack(pop)',skin_first)
+    dispatch='#pragma pack(push, 1)\n'+skin_text[skin_first:skin_last]+'\n#pragma pack(pop)\n'
+    dispatch+=declaration('    struct PickingSource\n')+'struct PickingCall;\n'
+    dispatch+=declaration('    struct WideSkinNote\n')
+    dispatch+=statement('    constexpr size_t kMaxWideSkins')
+    dispatch+=declaration('    struct WideSkinRegistry\n')
+    dispatch+=statement('    WideSkinRegistry g_wideSkins')+statement('    size_t g_wideSkinCount')
+    dispatch+=statement('    off::M2_SceneTriangleHitTestFn g_origTriangleHitTest')
+    dispatch+=statement('    constexpr uint32_t kPickingLogLimit')+statement('    constexpr uint32_t kLegacyWideLogBit')
+    dispatch+=declaration('    enum class PickingReject')+declaration('    struct PickingCall\n')
+    for marker in ['    window::SectionPlacement Placement(', '    uint32_t TriangleStart(',
+                   '    bool WideVertexStart(', '    bool CurrentPickingSource(',
+                   '    WideSkinNote* PickingNote(', '    const M2SkinProfile* LivePickingSkin(',
+                   '    bool LegacyNoteMatches(', '    WideSkinNote* LegacyPickingNote(',
+                   '    bool CurrentLegacyCall(', '    bool CurrentPickingCall(',
+                   '    void WarnPicking(', '    void LogPickingReject(', '    void RejectPicking(',
+                   '    void LogLegacyWide(', '    __declspec(noinline) int RunPickingGeometry(',
+                   '    int __fastcall hkHitTestGeometry(', '    PickingCall* PickingFillCall(',
+                   '    bool RefillPickingPositions(', '    void PreparePickingSection(',
+                   '    void PrepareLegacySection(', '    template <unsigned Filler>\n',
+                   '    PickingCall* PickingTriangleCall(', '    void LogPicking(',
+                   '    __declspec(noinline) int TestPickingSection(', '    int RejectPickingSection(',
+                   '    void WarnLegacySkip(', '    int LegacyPickingTriangle(',
+                   '    int __fastcall hkSceneTriangleHitTest(']:
+        dispatch+=declaration(marker)
+    (output/'dispatch.generated.hpp').write_text(dispatch)
     manifest = dict(client=str(client), clientSha256=hashlib.sha256(exe).hexdigest(),
                     predicateAddress='0x81d510', predicateSha256=hashlib.sha256(code).hexdigest(),
                     refillSource=str(source), refillSha256=hashlib.sha256(text[begin:end].encode()).hexdigest(),
                     models=[])
     manifest['nativeCaptures'] = {name: hashlib.sha256((output/name).read_bytes()).hexdigest()
-        for name in ('native.bin', 'fillers.bin', 'transform.bin', 'blend-scale.bin')}
+        for name in ('native.bin', 'fillers.bin', 'transform.bin', 'blend-scale.bin', 'geometry.bin', 'end-hit-test.bin')}
     manifest['generatedProduction'] = {name: hashlib.sha256((output/name).read_bytes()).hexdigest()
-        for name in ('types.generated.hpp', 'refill.generated.hpp', 'prepare.generated.hpp', 'fill-hook.generated.hpp')}
+        for name in ('types.generated.hpp', 'refill.generated.hpp', 'prepare.generated.hpp', 'fill-hook.generated.hpp', 'dispatch.generated.hpp')}
     for name, model, skin in pairs:
         m, s = model.read_bytes(), skin.read_bytes()
         vcount, voff = struct.unpack_from('<II', m, 0x3c)
@@ -69,6 +104,9 @@ def export(client, pairs, output):
         (output/(name+'.lookup')).write_bytes(s[lookup_offset:lookup_offset+lookup_count*2])
         indices = struct.unpack_from('<' + str(index_count) + 'H', s, index_offset)
         batches = [struct.unpack_from('<BB11H', s, batch_offset+i*24) for i in range(batch_count)]
+        (output/(name+'.sections')).write_bytes(s[section_offset:section_offset+section_count*48])
+        (output/(name+'.batches')).write_bytes(s[batch_offset:batch_offset+batch_count*24])
+        (output/(name+'.indices')).write_bytes(s[index_offset:index_offset+index_count*2])
         # Native filtering keeps layer zero and excludes the no-pick bit. Hidden sections are
         # supplied separately to the fixture, as masks; a file cannot establish live visibility.
         eligible = {b[3] for b in batches if b[7] == 0 and not b[0] & 8}
