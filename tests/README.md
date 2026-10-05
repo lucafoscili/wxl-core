@@ -519,3 +519,44 @@ This follow-up added no policy implementation,
 benchmark, DLL, installation or live test, and changes none of the large-model
 picking, native fallback or physics paths. Existing benchmark build instructions
 above still apply; there is no hover-throttle candidate to compose or install.
+
+#### Executable world-only continuation
+
+The follow-up [fixture](hover_refresh_fixture.cpp), exercised by
+[check_hover_refresh.py](check_hover_refresh.py), passes 15 exact-client cases.
+It supplies the original x86 frame prologue, enters native hover at `0x4FA05C`,
+and identifies its supplemental call by return address. A tail detour at
+`0x4FA32E` uses the native epilogue at `0x4FA368` for that supplemental call;
+ordinary frame calls retain their original trampoline and frame/UI suffix.
+The supplemental wrapper checks world input ownership before entering, so it
+never replays the Lua-producing UI-unit branch. Normal native UI processing is
+still exercised, including its fresh unit-token publication.
+
+All four native hit-type dispatch branches, suppression, object disappearance,
+special-object kind/owner rejection, null world/input/ownership and UI ownership
+are covered. The native setter/publisher execute; immediately after GUID
+publication the fixture executes native `InteractUnit("mouseover")` on a nested
+stack and asserts that native interaction receives the published GUID. Each
+case checks callee-saved registers and exact stack return. An ordinary frame
+case verifies that frame prefix/suffix are retained.
+
+The first input-loss assertion expected native GUID clearing and failed. Native
+processing deliberately keeps UI-owned state when no world pick is eligible;
+the corrected contract expires **our** retained world-hover state while keeping
+ordinary native UI semantics. A supplemental UI refresh would introduce Lua
+recursion before publication and is excluded by the ownership guard.
+
+Geometry, object residency, cursor/tooltip leaves and Lua query leaves are
+synthetic. These cases prove the scoped continuation/dispatch ABI and ordering,
+not rendered selection, actual script callback behavior or live performance.
+Dependencies are task-local `pefile 2024.8.26` and `unicorn 2.1.4`.
+
+In an x86 Visual Studio developer shell:
+
+```powershell
+cl /nologo /std:c++17 /O2 /GS- /LD /MT /EHs-c- tests/hover_refresh_fixture.cpp /Fo<scratch>/hover-refresh.obj /Fe<scratch>/hover-refresh.dll /link /NOENTRY /NODEFAULTLIB /FIXED /BASE:0x10000000
+python -B tests/check_hover_refresh.py --client <12340-Wow.exe> --fixture <scratch>/hover-refresh.dll --python-deps <scratch>/python-deps --output <scratch>/continuation-check.json
+```
+
+This fixture DLL is never an install candidate. Runtime throttle/refresh policy
+has not yet been connected to this established world-only seam.
