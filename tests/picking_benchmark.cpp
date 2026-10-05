@@ -73,6 +73,64 @@ int __fastcall ObserveTriangles(void* scene,void* edx,uint16_t* begin,uint16_t* 
     }
     return result;
 }
+// Bounded experiment only: a live section bound, never a pose/hit/topology cache.
+bool finitePosition(float v) {
+    uint32_t bits;std::memcpy(&bits,&v,4);return (bits&0x7f800000u)!=0x7f800000u;
+}
+bool SectionCannotCover(const float* positions,uint32_t vertices,const uint16_t* indices,
+                        uint32_t count,uint16_t start,const float* point) {
+    if(!positions || !point || !vertices || !count || count%3 || !finitePosition(point[0]) || !finitePosition(point[1]))return false;
+    float low[2]={positions[0],positions[1]},high[2]={low[0],low[1]};
+    for(uint32_t v=0;v<vertices;++v) {
+        const float* p=positions+size_t(v)*3;
+        if(!finitePosition(p[0]) || !finitePosition(p[1]) || !finitePosition(p[2]) || p[2]<=0.0001f)return false;
+        for(unsigned axis=0;axis<2;++axis) {if(p[axis]<low[axis])low[axis]=p[axis];if(p[axis]>high[axis])high[axis]=p[axis];}
+    }
+    bool outside=false;
+    for(unsigned axis=0;axis<2;++axis) {
+        double padding=(std::fabs(double(low[axis]))+std::fabs(double(high[axis]))+std::fabs(double(point[axis]))+1)*0.000030517578125;
+        if(double(point[axis])<double(low[axis])-padding || double(point[axis])>double(high[axis])+padding)outside=true;
+    }
+    if(!outside)return false;
+    // Keep native behavior for degenerate/ill-conditioned triangles. The actual kernel has
+    // an x87 area epsilon and a float spill in its barycentric calculation; do not extrapolate
+    // the geometric AABB argument through that uncertainty. This strict gate is measured too.
+    for(uint32_t k=0;k<count;k+=3) {
+        uint32_t a=window::LocalIndex(indices[k],start),b=window::LocalIndex(indices[k+1],start),c=window::LocalIndex(indices[k+2],start);
+        if(a>=vertices || b>=vertices || c>=vertices)return false;
+        const float* p=positions+size_t(a)*3;const float* q=positions+size_t(b)*3;const float* r=positions+size_t(c)*3;
+        double ux=double(q[0])-p[0],uy=double(q[1])-p[1],vx=double(r[0])-p[0],vy=double(r[1])-p[1];
+        double area=std::fabs(ux*vy-uy*vx),scale=std::max({std::fabs(ux),std::fabs(uy),std::fabs(vx),std::fabs(vy)});
+        if(area<=0.00001 || area*16<scale*scale)return false;
+    }
+    return true;
+}
+bool enableSectionBounds=false;
+unsigned skippedSections=0;
+int __fastcall BoundedTriangles(void* scene,void* edx,uint16_t* begin,uint16_t* end,int base,
+                                float* point,int mode,int candidate,float* depth,int hit) {
+    if(enableSectionBounds && mode==0) {
+        auto* call=full::PickingTriangleCall(scene,point,mode,candidate,depth);
+        if(call && call->pending && call->identified && call->section.vertexCount
+            && *At<uint32_t>(scene,off::kOffSceneHitTestCapacity)>=call->section.vertexCount) {
+            bool valid=false;
+            if(call->legacy && full::CurrentLegacyCall(*call)) {
+                auto plan=window::PlanLegacyTriangle((uintptr_t)call->skin->indices,call->skin->indexCount,
+                                                    full::Placement(call->section),(uintptr_t)begin,(uintptr_t)end,base);
+                valid=plan.action==window::LegacyAction::Remap;
+            } else if(!call->legacy && call->ready && full::CurrentPickingCall(*call)) {
+                valid=window::StockTriangleCall((uintptr_t)call->skin->indices,full::Placement(call->section),
+                                               (uintptr_t)begin,(uintptr_t)end,base);
+            }
+            if(valid && SectionCannotCover(*At<float*>(scene,off::kOffSceneHitTestPositions),call->section.vertexCount,
+                call->skin->indices+full::TriangleStart(call->section,*call->skin),call->section.indexCount,
+                call->section.vertexStart,point)) {
+                call->pending=false;++skippedSections;return hit;
+            }
+        }
+    }
+    return full::hkSceneTriangleHitTest(scene,edx,begin,end,base,point,mode,candidate,depth,hit);
+}
 unsigned nativeCalls=0;
 Fill forwardedNative=nullptr;void* forwardedSkin=nullptr;
 bool executeForward=true;
@@ -140,7 +198,25 @@ Result run(Native native, std::vector<Section>& sections, float* point, bool fil
 }
 int main(int argc,char** argv) {
     assert(argc>=3 && sizeof(void*)==4);
-    const bool dispatchOnly=std::string(argv[2])=="--dispatch";
+    const bool boundsMode=std::string(argv[2])=="--bounds";
+    const bool dispatchOnly=boundsMode || std::string(argv[2])=="--dispatch";
+    if(boundsMode) {
+        float triangle[9]={0,0,2,1,0,2,0,1,2};uint16_t indices[3]={0,1,2};float p[2]={2,2};
+        assert(SectionCannotCover(triangle,3,indices,3,0,p));
+        p[0]=1;p[1]=0;assert(!SectionCannotCover(triangle,3,indices,3,0,p));
+        p[0]=1.00001f;assert(!SectionCannotCover(triangle,3,indices,3,0,p));p[0]=p[1]=2;
+        for(unsigned component=0;component<9;++component) {
+            float saved=triangle[component];triangle[component]=std::numeric_limits<float>::quiet_NaN();
+            assert(!SectionCannotCover(triangle,3,indices,3,0,p));triangle[component]=saved;
+        }
+        p[0]=std::numeric_limits<float>::infinity();assert(!SectionCannotCover(triangle,3,indices,3,0,p));p[0]=2;
+        triangle[2]=0;assert(!SectionCannotCover(triangle,3,indices,3,0,p));triangle[2]=-1;
+        assert(!SectionCannotCover(triangle,3,indices,3,0,p));triangle[2]=2;
+        triangle[7]=0;assert(!SectionCannotCover(triangle,3,indices,3,0,p));triangle[7]=0.0001f;
+        assert(!SectionCannotCover(triangle,3,indices,3,0,p));triangle[7]=1;
+        indices[2]=3;assert(!SectionCannotCover(triangle,3,indices,3,0,p));indices[2]=2;
+        assert(!SectionCannotCover(triangle,3,indices,2,0,p));
+    }
     auto bytes=read(std::string(argv[1])+"/native.bin"); assert(bytes.size()==0x16c);
     float epsilon; std::memcpy(&epsilon,bytes.data()+0x168,4);
     auto* executable=(char*)VirtualAlloc(nullptr,0x1000,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
@@ -181,7 +257,7 @@ int main(int argc,char** argv) {
     redirect(0x81dccf,(uintptr_t)full::hkFillPickingVertices<2>);
     redirect(0x81dcdf,(uintptr_t)full::hkFillPickingVertices<0>);
     redirect(0x81dce6,(uintptr_t)full::hkFillPickingVertices<1>);
-    redirect(0x81dd19,(uintptr_t)full::hkSceneTriangleHitTest);
+    redirect(0x81dd19,(uintptr_t)(boundsMode?BoundedTriangles:full::hkSceneTriangleHitTest));
     uint32_t cpuFlags=4,oldCpuAddress=0xd3fcec,cpuAddress=(uint32_t)&cpuFlags,cpuRelocations=0;
     for(unsigned i=0;i<geometryBytes.size()-3;++i)if(std::memcmp(geometry+i,&oldCpuAddress,4)==0) {
         std::memcpy(geometry+i,&cpuAddress,4);++cpuRelocations;
@@ -344,6 +420,49 @@ int main(int argc,char** argv) {
             }
             std::printf("%s fullRegistry1=%.4fms fullRegistry64=%.4fms noTriangleKernel=%.4fms topologyValidationRebaseCurrency=%.4fms batches=%u sections=%u\n",
                         argv[file],fullTime[0],fullTime[1],withoutTriangles,topologyTime,nativeSkin.batchCount,nativeSkin.submeshCount);
+            if(boundsMode) {
+                double bounded[2]={};unsigned rejected=0,checks=0;
+                for(unsigned choice=0;choice<2;++choice) {
+                    enableSectionBounds=choice!=0;skippedSections=0;
+                    auto started=std::chrono::steady_clock::now();
+                    for(unsigned repeat=0;repeat<20;++repeat)for(unsigned y=0;y<6;++y) {
+                        point[1]=miny+(maxy-miny)*(float(y)-0.5f)/4;
+                        float depth=10000;sink+=full::hkHitTestGeometry(&fillScene,nullptr,instance,0,
+                                                                     projection,0,point,1,&depth,0);
+                    }
+                    bounded[choice]=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()/120;
+                    if(choice)rejected=skippedSections/20;
+                }
+                for(unsigned x=0;x<7;++x)for(unsigned y=0;y<11;++y)for(unsigned prior=0;prior<2;++prior) {
+                    point[0]=minx+(maxx-minx)*(float(x)-0.5f)/5;point[1]=miny+(maxy-miny)*(float(y)-0.5f)/9;
+                    float depth[2]={prior?0.25f:10000.0f,prior?0.25f:10000.0f};int hit[2];
+                    for(unsigned choice=0;choice<2;++choice) {
+                        enableSectionBounds=choice!=0;
+                        hit[choice]=full::hkHitTestGeometry(&fillScene,nullptr,instance,0,projection,0,point,7,&depth[choice],prior?3:0);
+                    }
+                    assert(hit[0]==hit[1] && std::memcmp(depth,depth+1,4)==0);++checks;
+                }
+                setPalette(true);
+                for(unsigned b=0;b<256;++b) {
+                    float* m=palette+b*16;
+                    for(unsigned row=0;row<4;++row) {float y=m[row*4+1],z=m[row*4+2];m[row*4+1]=z;m[row*4+2]=-y;}
+                    m[14]+=10;
+                }
+                for(unsigned masked=0;masked<2;++masked)for(unsigned y=0;y<4;++y)for(unsigned prior=0;prior<2;++prior) {
+                    for(unsigned s=0;s<visible.size();++s)visible[s]=!masked || s%2;
+                    point[0]=(minx+maxx)*0.5f;point[1]=miny+(maxy-miny)*(float(y)-0.5f)/2;
+                    float depth[2]={prior?0.25f:10000.0f,prior?0.25f:10000.0f};int hit[2];
+                    for(unsigned choice=0;choice<2;++choice) {
+                        enableSectionBounds=choice!=0;
+                        hit[choice]=full::hkHitTestGeometry(&fillScene,nullptr,instance,0,projection,0,point,7,&depth[choice],prior?3:0);
+                    }
+                    assert(hit[0]==hit[1] && std::memcmp(depth,depth+1,4)==0);++checks;
+                }
+                enableSectionBounds=false;
+                std::printf("%s boundsBefore=%.4fms boundsAfter=%.4fms rejectedAcross6Points=%u pointPriorChecks=%u\n",
+                            argv[file],bounded[0],bounded[1],rejected,checks);
+            }
+            std::fflush(stdout);
             continue;
         }
         float projection[3]={0,1,0};double fillTime=0,denseTime=0;unsigned upper=0;

@@ -353,3 +353,55 @@ lower-detail picking proxy is a separate content/interaction decision: it change
 selectable silhouette/detail and needs explicit behavior acceptance; it is not an
 exact optimization of the current picker. No new bounds, cache, proxy or throttle
 is implemented by this diagnostic.
+
+
+### Live section-bound experiment - 5 October 2026
+
+**DROP.** `--bounds` is a benchmark-only experiment; no runtime, DLL or installed
+behavior changes. It scans positions just filled for the current section and
+forms a padded projected bound. Only exact identified stock section calls can
+reject. Mode one, nonfinite values, nonpositive/near-plane depth, invalid local
+indices, degenerate triangles and strongly ill-conditioned triangles retain the
+original hook. A deliberately strict triangle condition check protects the AABB
+argument from the captured kernel's x87 area epsilon and float barycentric spill.
+This is a limited experiment, not proof of equivalence for every native float
+input. No cached pose, hit, topology, proxy or new allocation is used.
+
+```powershell
+<scratch>/picking_benchmark.exe <scratch> --bounds installed-tifa installed-elene tifa kasumi ayane shadowheart luna human-female
+```
+
+Use a fresh named output for this experiment; retain the preceding dispatch
+benchmark outputs unchanged. Six point heights, including hits and misses beyond
+the model extent, are timed over 20 passes. Both before/after use the same captured
+native dispatcher and kernel with the same live palette. The synthetic view and
+visibility/material setup have the same limits as the warm-dispatch benchmark.
+
+| Mesh | Original dispatcher | Bound experiment |
+| --- | ---: | ---: |
+| Installed Tifa | 3.032 ms | 3.303 ms |
+| Installed Elene | 1.711 ms | 1.851 ms |
+| Kasumi | 1.083 ms | 1.253 ms |
+| Ayane | 0.897 ms | 1.087 ms |
+| Shadowheart | 0.991 ms | 1.147 ms |
+| Luna source | 1.361 ms | 1.509 ms |
+
+Tifa rejected 44 sections across the six points, Kasumi 12; the other listed
+meshes rejected none under the uncertainty gate. Scanning positions and checking
+uncertainty erased any saving. A second focused Tifa pass was also slower
+(3.012 -> 3.246 ms). The experiment agreed with original hit/depth results for
+154 point/prior-hit cases per mesh across eight meshes. Tifa and stock HumanFemale
+additionally pass 16 animated-palette/partial-visibility/prior-hit cases each;
+small direct fixtures require the bound to defer for edge padding, NaN/infinity,
+near-plane/behind, degenerate/skinny and malformed-index inputs. Correctness gates
+were not loosened to obtain a speedup. Do not promote this helper into the runtime.
+
+The next useful live evidence is geometry-call/candidate and mode-one retry
+frequency while walking plus hover, compared with walking plus cursor-away. The
+existing `hkHitTestGeometry` / `RunPickingGeometry` owner already sees each scoped
+call and its mode. Its current picking logs are capped class/rejection samples,
+not frequency/timing counters. A bounded sample there could distinguish movement
+multiplying geometry checks from this fixed per-call cost exhausting the frame
+budget. No instrumentation is added in this experiment. A verified conservative
+bound before expensive skinning remains a separate next evidence question; no
+picking-proxy behavior decision is inferred.
