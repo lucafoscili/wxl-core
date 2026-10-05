@@ -409,7 +409,7 @@ picking-proxy behavior decision is inferred.
 
 ### Passive hover throttle boundary - 5 October 2026
 
-**Proposed policy; no throttle implemented.** A bounded read of the same 12340
+**Historical investigation; superseded by the opt-in trial below.** A bounded read of the same 12340
 client found two direct native origins of `PickAtScreen` (`0x4F9DA0`):
 
 | Origin | Observed behavior |
@@ -554,9 +554,73 @@ Dependencies are task-local `pefile 2024.8.26` and `unicorn 2.1.4`.
 In an x86 Visual Studio developer shell:
 
 ```powershell
-cl /nologo /std:c++17 /O2 /GS- /LD /MT /EHs-c- tests/hover_refresh_fixture.cpp /Fo<scratch>/hover-refresh.obj /Fe<scratch>/hover-refresh.dll /link /NOENTRY /NODEFAULTLIB /FIXED /BASE:0x10000000
+cl /nologo /std:c++20 /O2 /Oi /GS- /LD /MT /EHs-c- /I src tests/hover_refresh_fixture.cpp /Fo<scratch>/hover-refresh.obj /Fe<scratch>/hover-refresh.dll /link /NOENTRY /OPT:REF /FIXED /BASE:0x10000000
 python -B tests/check_hover_refresh.py --client <12340-Wow.exe> --fixture <scratch>/hover-refresh.dll --python-deps <scratch>/python-deps --output <scratch>/continuation-check.json
 ```
 
-This fixture DLL is never an install candidate. Runtime throttle/refresh policy
-has not yet been connected to this established world-only seam.
+#### Opt-in passive world-hover trial
+
+**Keep for a reversible Beta experiment; live verdict remains untested.**
+[HoverPicking.cpp](../src/engine/input/HoverPicking.cpp) owns the one shared
+refresh policy. Build with `WXL_PASSIVE_HOVER_TRIAL=ON` (default OFF); the existing
+composed-runtime producer forwards `--passive-hover-trial` to that option.
+`CLIENT_PATH` must be empty, so this switch cannot trigger the build's automatic
+client copy. The standalone checked build was:
+
+```powershell
+cmake -S . -B build-hover-evidence/core -G "Visual Studio 17 2022" -A Win32 -DCLIENT_PATH:PATH= -DWXL_PASSIVE_HOVER_TRIAL:BOOL=ON
+cmake --build build-hover-evidence/core --config Release --target WarcraftXL --parallel 8
+```
+
+Only mode 1 returning to `0x4FA13F` in the world-owned frame is eligible. Its
+first object hit is immediate; subsequent retained object values can last less
+than 100 ms. At the boundary the full native picker runs again. Unsigned elapsed
+time handles timer wrap. Misses, terrain, unknown origins/modes, targeting and
+cursor suppression stay fresh. Each reuse requires the same frame/input context,
+matching published native GUID and current object residency. Retained state holds
+GUID/ray values and GUI context identity, never geometry/object/skin pointers.
+Native dispatch and publication still execute each normal frame.
+
+Input/focus/world/object-destruction loss expires the retained world result.
+Movement intentionally permits the approved brief visual age. Shared
+`mouseover` token resolution (including native prefixes/suffixes) and
+`InteractUnit` invoke one supplemental native pick/dispatch/publication before
+their consumers; button-down refresh runs before input subscribers. A TLS guard
+allows a nested consumer only after native publication, without recursive picks.
+Supplemental refresh checks world ownership and does not replay UI Lua. Ordinary
+UI processing and vanilla retained GUID behavior continue on ownership loss;
+only our cache expires. Existing native picker fallback, >65K repair and physics
+source are unchanged.
+
+The fixture now includes the production owner verbatim and patches the exact
+native entry points with equivalent offline trampolines. **34 cases pass**:
+the original 15 continuation/dispatch cases plus compiled policy checks for the
+100 ms boundary/wrap, both consumer hooks and nested actions, button/key/focus
+input, cursor movement, world/UI/input-context/load/target eligibility loss,
+target disappearance, external GUID change, unknown callers and uncached misses.
+Stack and callee-saved registers are checked on normal frame calls as well as the
+continuation. World-event coverage invokes the owner's invalidation operation;
+event delivery and MinHook installation itself are not emulated.
+
+The fixture's bounded cadence comparison drives 100 frames at 10 ms intervals:
+stable eligible passive hover makes **10** full synthetic pick calls versus
+**100** native passive calls. With a `mouseover` token query each frame it makes
+**101** (one initial passive plus 100 forced queries). Each fresh eligible action
+result seeds the passive interval, while even same-timestamp actions always pick
+afresh. Presentation polling can therefore erase the saving; repeated queries
+within a frame can still increase pick work. These are dispatch counts with synthetic
+geometry, not elapsed CPU, rendered hit accuracy, Deck FPS or a net performance
+claim. Actual Lua callback behavior and the visible highlight/action experience
+need the composed Beta play test.
+
+Replay used pristine client hash above, Python 3.11, and task-local dependencies
+at `F:/GitHub/wxl-core-hover-performance/build-hover-evidence/python-deps`:
+`pefile 2024.8.26`, `unicorn 2.1.4`. The fixture explicitly initializes x86 TLS.
+Its `/NOENTRY` DLL link warns LNK4210 about CRT initializers; it is emulator-only,
+and no DLL loader or CRT initializer is claimed by that fixture. Production DLL
+uses the normal build/loader. Generated report is
+`build-hover-evidence/continuation-check.json`, with exact cases and dependency
+versions. The 34 existing source contracts also pass. No installation was run.
+
+The fixture DLL is never an install candidate. Compose the production build
+through the existing runtime producer for the opt-in Beta trial.

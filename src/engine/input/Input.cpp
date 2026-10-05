@@ -20,6 +20,7 @@
 
 #include "common/Log.hpp"
 #include "game/Pick.hpp"
+#include "engine/input/HoverPicking.hpp"
 
 #include <windows.h>
 
@@ -71,6 +72,7 @@ namespace
      */
     LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
     {
+        wxl::input::hover::BeforeInput(m);
         bool handled = false;
         ev::InputArgs a{ m, static_cast<uintptr_t>(w), static_cast<uintptr_t>(l), &handled };
         ev::Emit(ev::Event::OnInput, &a);

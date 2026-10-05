@@ -103,6 +103,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
 
     include("${CMAKE_CURRENT_SOURCE_DIR}/src/client/MinimapTracking/Trial.cmake")
     include("${CMAKE_CURRENT_SOURCE_DIR}/src/client/StorySelect/Trial.cmake")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/src/engine/input/Trial.cmake")
 
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${WXL_CORE_SRC})
 
