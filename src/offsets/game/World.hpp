@@ -190,11 +190,14 @@ namespace wxl::offsets::game::world
     constexpr size_t kInputCursorNdcY = 0x1228;
     constexpr uintptr_t kDdcWidth  = 0x00AC0CB4;
     constexpr uintptr_t kDdcHeight = 0x00AC0CB8;
-    // Full cursor pick: sets up the world projection, builds the ray, and intersects, in one call. This is the engine's own per-frame mouseover entry
+    // Full cursor pick: sets up the world projection, builds the ray, and intersects, in one call.
+    // Both passive frame updates and explicit/default-action picks use this entry.
     // this = world frame; result[0..5] = {objLo, objHi, posX, posY, posZ, t}; returns the hit type.
     constexpr uintptr_t kPickAtScreen = 0x004F9DA0;
     using PickAtScreenFn = int(__thiscall*)(void* worldFrame, float ddcX, float ddcY, int mode, void* result12);
-    // Mode the per-frame mouseover pick uses (the safe, always-exercised path).
+    // Mode used by WXL's explicit picks and native SetupDefaultAction (0x004FA570).
+    // The native passive frame-update call at 0x004FA13A passes mode 1 instead;
+    // mode alone is not a passive-versus-action caller contract.
     constexpr int kPickModeCursor = 0;
 
     // Lower-level pieces the full pick uses internally; documented landmarks.

@@ -405,3 +405,51 @@ multiplying geometry checks from this fixed per-call cost exhausting the frame
 budget. No instrumentation is added in this experiment. A verified conservative
 bound before expensive skinning remains a separate next evidence question; no
 picking-proxy behavior decision is inferred.
+
+
+### Passive hover throttle boundary - 5 October 2026
+
+**Discussion only; no throttle implemented.** A bounded read of the same 12340
+client found two direct native origins of `PickAtScreen` (`0x4F9DA0`):
+
+| Origin | Observed behavior |
+| --- | --- |
+| Frame update `0x4FA040`, call `0x4FA13A` / return `0x4FA13F` | Takes a frame delta, checks input ownership against the world frame, reads live normalized cursor coordinates, then picks into a local result with mode **1**. This is the available passive-hover origin. |
+| `SetupDefaultAction` `0x4FA570`, call `0x4FA5C0` / return `0x4FA5C5` | Refreshes live cursor coordinates into frame `0x310/0x314`, picks with mode **0** into frame `0x2E0`, and records the result type at `0x2D8`. Direct action-setup callers occur at `0x5FC63F`, `0x5FC6EF`, `0x5FC7B3`, and `0x5FC7F3`. |
+
+The generated read-only listing is
+`F:/GitHub/velora-codex-hover-performance/wow/queued/features/crossover-hover-performance/caller-evidence/world-pick-callers.txt`
+(SHA256 `2cc42c2bb40eb0d87ac11d3cb70a93f3469a9218e2b88fa9e59d825ac9c8938a`).
+It includes client path/hash, dumpbin tool and captured address ranges; client
+SHA256 is `1df8ba4be431b5396a27680e44d287c6e364b6ba34b97599deadb18541737ef6`.
+This is instruction evidence, not a live call-frequency measurement or proof of
+every indirect caller/action consumer. The SDK mode-zero comment was corrected;
+its constant, value and behavior remain unchanged.
+
+The existing [input owner](../src/engine/input/Input.cpp) calls
+[PickCursor](../src/game/Pick.hpp) afresh for each unconsumed left/right button
+down before publishing `OnWorldClick`. This supports keeping explicit picks
+unthrottled, but does not establish freshness for all native actions or macros.
+[MouseoverGuid](../src/game/World.hpp) simply reads the cached global GUID at
+`0xBD07A0`; an `@mouseover` action could consume that state without going through
+the observed default-action setup. That consumer boundary remains unknown.
+
+The proposed initial policy is an immediate first eligible passive pick, then
+repeated passive refreshes at most once per 100 ms (10 Hz). Gate only the proven
+passive origin, preserving the rest of frame/UI update work and leaving unknown
+query contexts unthrottled. Every actual refresh still runs the native picker
+with current pose, visibility, distance and hit arbitration. Reuse only bounded
+presentation/target state, not cached geometry hits or model pointers. Clear or
+invalidate retained presentation when its target disappears or world/input
+eligibility changes; restart the leading edge when passive hover resumes.
+
+Before any action, including mouseover-target macros, the policy requires a fresh
+full pick **and the correct native mouseover-state update** at its consumer
+boundary. Refresh-on-click alone is insufficient, and a fresh WXL `WorldHit`
+does not prove that the cached mouseover GUID was updated. Locating this action
+boundary is the remaining implementation dependency. Switching targets, cursor
+movement or animation inside the 100 ms window can briefly retain an old
+highlight/tooltip; this policy does not promise instant detection of every new
+target. It deliberately accepts that visual age while requiring fresh action
+selection. No performance saving or live behavior has been measured for it, and
+no throttle, build or installation is authorized by this discussion.
