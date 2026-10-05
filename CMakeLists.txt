@@ -90,6 +90,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
 
     add_library(WarcraftXL SHARED ${WXL_CORE_SRC} ${WXL_IMGUI})
     set_target_properties(WarcraftXL PROPERTIES OUTPUT_NAME "WarcraftXL" PREFIX "")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/src/engine/input/Trial.cmake")
     target_include_directories(WarcraftXL PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"   # the extension ABI, shared verbatim with extensions
@@ -103,7 +104,6 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
 
     include("${CMAKE_CURRENT_SOURCE_DIR}/src/client/MinimapTracking/Trial.cmake")
     include("${CMAKE_CURRENT_SOURCE_DIR}/src/client/StorySelect/Trial.cmake")
-    include("${CMAKE_CURRENT_SOURCE_DIR}/src/engine/input/Trial.cmake")
 
     source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${WXL_CORE_SRC})
 
