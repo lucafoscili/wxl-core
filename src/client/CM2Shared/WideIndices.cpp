@@ -1163,9 +1163,25 @@ namespace
         static_assert(Filler < 3);
         PickingCall* call = PickingFillCall(scene, instance, skin);
         if (call) call->pending = false;
-        // Do not replace the filler or forge an instance/header/skin. Downstream hooks get the
-        // same arguments and the native code keeps owning its original fill. For upper sections
-        // the extra dense fill below overwrites those incorrect positions, not their allocation.
+        // Geometry grows its native scratch BEFORE calling a filler (0x81DC01-0x81DCAE).
+        // An exact certified upper section can use the existing dense refill as its sole fill:
+        // the native fillers only write these positions and would skin a wrong 16-bit lookup
+        // immediately before we overwrite it. No pose/position cache or forged model is needed.
+        // This deliberately replaces the filler chain for that successful case. Low, legacy,
+        // unsupported and rejected calls keep forwarding. A custom downstream filler must be
+        // reconciled here before it can add side effects to the successful replacement path.
+        uint32_t index = 0, first = 0;
+        if (call && !call->legacy && CurrentPickingCall(*call)
+            && window::ArraySlot(reinterpret_cast<uintptr_t>(section),
+                                 reinterpret_cast<uintptr_t>(call->source.sections),
+                                 call->source.sectionCount, sizeof(M2SkinSection), index)
+            && WideVertexStart(*call->skin, index, first)
+            && window::NeedsPickingPositions(first, call->source.sections[index].vertexCount))
+        {
+            PreparePickingSection(*call, section, Filler, mode, projection, distance);
+            if (call->ready) return;
+            call->pending = false; // a rejected/partial preparation cannot match a nested call
+        }
         g_wideSkins.fillNext[Filler](scene, edx, instance, skin, section, mode, projection, distance);
         if (!call) return;
         if (call->legacy)

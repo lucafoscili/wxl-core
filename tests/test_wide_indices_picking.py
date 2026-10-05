@@ -15,11 +15,19 @@ FORWARDED = ("return g_origTriangleHitTest(scratch, edx, indexBegin, indexEnd, v
 
 # One filler call arms exactly one triangle call. The fill hook clears the frame's pending flag
 # before the chain runs, so a failed or foreign fill never leaves an older section armed, and
-# only the record written after the chain can arm the next triangle call.
+# only a completed certified upper fill or the record written after the chain can arm it.
 FILL_HOOK = (
     "static_assert(Filler < 3); "
     "PickingCall* call = PickingFillCall(scene, instance, skin); "
     "if (call) call->pending = false; "
+    "uint32_t index = 0, first = 0; "
+    "if (call && !call->legacy && CurrentPickingCall(*call) "
+    "&& window::ArraySlot(reinterpret_cast<uintptr_t>(section), "
+    "reinterpret_cast<uintptr_t>(call->source.sections), call->source.sectionCount, "
+    "sizeof(M2SkinSection), index) && WideVertexStart(*call->skin, index, first) "
+    "&& window::NeedsPickingPositions(first, call->source.sections[index].vertexCount)) { "
+    "PreparePickingSection(*call, section, Filler, mode, projection, distance); "
+    "if (call->ready) return; call->pending = false; } "
     "g_wideSkins.fillNext[Filler](scene, edx, instance, skin, section, mode, projection, distance); "
     "if (!call) return; "
     "if (call->legacy) PrepareLegacySection(*call, section); "
@@ -261,9 +269,9 @@ class WidePickingTests(unittest.TestCase):
             self.assertNotIn(forbidden, run)
         self.assertIn("__declspec(noinline) int RunPickingGeometry", SOURCE)
 
-    def test_every_filler_continues_unchanged_before_the_repair(self):
-        # The whole body: clear before the chain, one forwarded call with the original arguments,
-        # then the frame's own record. No shape walk or palette read on the unmatched path.
+    def test_only_completed_certified_upper_fills_replace_native(self):
+        # Whole body: exact upper section/current certificate, full preparation validates args
+        # and scratch/palette. Failed/partial attempts disarm before the unchanged fallback.
         self.assertEqual(code(body("hkFillPickingVertices")), FILL_HOOK)
         # The fill lookup keys on scene, instance and skin together.
         self.assertEqual(code(body("PickingFillCall")), FILL_CALL)
@@ -376,7 +384,7 @@ class WidePickingTests(unittest.TestCase):
         flat = code(SOURCE)
         self.assertEqual(flat.count("call.pending = true;"), 2)
         self.assertEqual(flat.count("call.identified = true;"), 2)
-        self.assertEqual(flat.count("->pending = false;"), 2)
+        self.assertEqual(flat.count("->pending = false;"), 3) # failed prefill disarms before fallback
 
     def test_legacy_triangle_keeps_the_remap_and_the_crossing_skip(self):
         # The whole body: the gate, the pure plan, the skip, the remap and one forwarded call.

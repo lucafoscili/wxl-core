@@ -154,12 +154,17 @@ collision's own triangle call, run outside every geometry scope and reach the
 next link unchanged.
 
 The bridge scopes its context to the native geometry call and observes all three
-native fillers, forwarding their original arguments. The filler identifies the
-exact section, not the first section sharing a truncated range. Crossing and
-wholly-above sections get dense CPU positions from the current bone palette;
-lower sections keep their native positions. Native filters, allocation and
-triangle arbitration remain in charge. A 3,072-index stack block in a separate
-non-inlined function submits complete local triangles with vertex base zero,
+native fillers. A fully prepared, certified crossing or wholly-above section uses
+the existing dense CPU fill from the current bone palette as its sole fill. Native
+geometry allocates its scratch positions before invoking the filler; the stock
+fillers only write those positions, so their redundant truncated-lookup fill can
+be skipped. Every low, legacy, unnoted or rejected fill forwards its original
+arguments. The filler identifies the exact section, not the first section sharing
+a truncated range. Native filters, allocation and triangle arbitration remain in
+charge. This changes the successful upper-section fill-chain contract: a future
+custom downstream filler with additional side effects must reconcile them before
+joining this chain. The installed physics02 composition has no such filler.
+A 3,072-index stack block in a separate non-inlined function submits complete local triangles with vertex base zero,
 carrying currentHit and bestDepth through every chunk. No patch-owned heap
 allocation is added. The chunk loop works from a snapshot of the section, triangle
 start and skin taken at entry, and stops, keeping the native prefix result, if the
@@ -174,7 +179,8 @@ the native no-hit result.
 `test_wide_indices_picking.py` pins the gate, lifetime, argument forwarding,
 section identity, native blend selection, bounds, chunking and logging. The
 one-fill, one-triangle handshake both frame kinds depend on is pinned as whole
-normalised bodies: the fill hook (clear the pending fill, forward, then record),
+normalised bodies: the fill hook (clear pending, try the exact upper fill, return
+only after complete preparation; otherwise disarm, forward and record),
 the legacy section record, the start of the admitted record, the triangle hook
 (read and then clear the pending fill before either frame kind is dispatched, the
 full admitted match, then the empty, ready and reject dispatch), the legacy
@@ -220,3 +226,54 @@ skip crossing sections`. Thread affinity and same-scene reentrancy must be
 checked locally; the scoped registry link is not a lock or an asset-lifetime
 pin. Native hover, wrong-place selection, movement, occlusion and rendering
 remain separate checks.
+
+### Picking fill performance - 5 October 2026
+
+`picking_benchmark.py` exports read-only M2/SKIN geometry and exact x86 code from
+12340 `Wow.exe`. Its manifest records the executable, model, skin, native capture
+and generated production-body hashes. `--installed-client` resolves Tifa/Elene's
+named Beta target archives through Velora's existing StormLib owner. It does not
+launch or change the client. From this checkout and an x86 MSVC developer prompt:
+
+```powershell
+python -B tests/picking_benchmark.py --client <Wow.exe> --assets <velora/wow/_ssot> --installed-client <Beta-client> --output <scratch>
+cl /nologo /O2 /EHsc /std:c++17 /Isrc /I<scratch> tests/picking_benchmark.cpp /Fe:<scratch>/picking_benchmark.exe
+<scratch>/picking_benchmark.exe <scratch> installed-tifa installed-elene tifa kasumi ayane shadowheart luna human-female
+```
+
+The fixture executes the captured SSE/scalar/single-bone fillers, blend helpers,
+affine transform and triangle predicate. Only external addresses are relocated;
+native instruction bytes otherwise stay intact. It compiles the actual production
+fill hook, section preparation and dense refill bodies generated from
+`WideIndices.cpp`; doubles supply the scene/model boundary and certificate result.
+This is not a complete client ABI or installed-hook test.
+
+Eight meshes pass 2,056 fill comparisons over both projection modes, all three
+filler entries, and identity plus a deterministic animated palette with varying
+bone translations and noncommuting rotations. Successful certified upper fills
+make no native filler call and produce byte-identical final positions and native hit/depth results, including a
+prior nearer hit. Low/index-only and legacy fills forward. Rejected certificate,
+section, mode, projection, distance, empty/malformed section, insufficient scratch,
+and missing/misaligned/invalid bone-palette cases also forward exact arguments,
+with the pending handshake disarmed during that call. The source contracts still
+pin the real currency predicates and triangle dispatch rather than the doubles.
+
+The measured duplicate work is the stock upper-section fill whose positions the
+existing wide repair immediately replaces: 91,305 vertices for installed Tifa
+(149,674 vertices / 182,078 triangles), and 39,188 for installed Elene
+(94,817 / 111,932). With identity bone palettes and 100 passes, their composed fill
+loops measured 2.596 -> 1.594 ms and 0.912 -> 0.620 ms respectively. The unchanged
+native triangle kernels measured 1.416 ms and 1.021 ms. These timings exclude
+geometry dispatch, admission/index preparation, triangle arbitration overhead
+and live animated palettes; they are
+offline component CPU costs, not measured game FPS. Skins below 65,537 vertices,
+and upper skins without a current admission certificate, receive no saving.
+
+A conservative triangle-bound filter remains a rejected benchmark experiment:
+10,416 finite point/mask comparisons agreed with the native predicate, but timings
+were slower or inconsistent. It is not in the runtime. This limited experiment
+makes no equivalence claim for every nonfinite/degenerate native input. The sole
+fill change does not change native triangle decisions, visibility filtering,
+chunking, nearest-depth arbitration or the existing >65K crash protection.
+Native acceptance and the broader low-vertex hover cost remain open evidence
+questions for the delivery owner.
