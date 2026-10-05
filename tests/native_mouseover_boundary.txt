@@ -1,0 +1,465 @@
+Read-only native mouseover boundary evidence; 5 October 2026
+Client: I:/AI/References/games/WoW/ChromieCraft_3.3.5a/Wow.exe
+SHA256: 1df8ba4be431b5396a27680e44d287c6e364b6ba34b97599deadb18541737ef6
+Tool: Visual Studio dumpbin /DISASM:NOBYTES (14.38.33135.0)
+Selected instruction excerpts; no live client, hook or action execution.
+Owner/verdict: tests/README.md, Bounded action-consumer follow-up.
+
+Independent PE byte checks:
+0060AEC2: 8b 4d 08 6a 09 68 6c 2e a0 00 51 PASS
+0060AED6: 8b 15 a0 07 bd 00 PASS
+00527F37: 68 ff ff ff 7f 8b f0 68 6c 2e a0 00 56 PASS
+00527F4D: a1 a0 07 bd 00 8b 15 a4 07 bd 00 PASS
+004F59C0: e8 9b a1 02 00 PASS
+0051FB75: e8 16 fc ff ff PASS
+0051F82D: a3 a0 07 bd 00 89 0d a4 07 bd 00 PASS
+004907A5: e8 16 9b 38 00 PASS
+00AC8350: 1c e0 9f 00 00 7f 52 00 (InteractUnit registration) PASS
+009FE01C: InteractUnit\0 PASS
+00A02E6C: mouseover\0 PASS
+004FA374: 004FA309, 004FA27D, 004FA28D, 004FA29D (native type dispatch)
+
+Selected native instruction bodies:
+
+Native frame pre-pick callback (004FA040-004FA057):
+  004FA040: push        ebp
+  004FA041: mov         ebp,esp
+  004FA043: sub         esp,3Ch
+  004FA046: fld         dword ptr [ebp+8]
+  004FA049: push        ebx
+  004FA04A: push        esi
+  004FA04B: push        edi
+  004FA04C: push        ecx
+  004FA04D: fstp        dword ptr [esp]
+  004FA050: mov         ebx,ecx
+  004FA052: call        00490770
+  004FA057: call        0056D050
+
+Native frame selection dispatch (004FA260-004FA329):
+  004FA260: mov         eax,dword ptr [ebp-4]
+  004FA263: cmp         eax,3
+  004FA266: mov         dword ptr ds:[00AC79A4h],3
+  004FA270: ja          004FA32E
+  004FA276: jmp         dword ptr [eax*4+004FA374h]
+  004FA27D: lea         eax,[ebp-3Ch]
+  004FA280: push        eax
+  004FA281: mov         ecx,ebx
+  004FA283: call        004F66C0
+  004FA288: jmp         004FA32E
+  004FA28D: lea         ecx,[ebp-3Ch]
+  004FA290: push        ecx
+  004FA291: mov         ecx,ebx
+  004FA293: call        004F8190
+  004FA298: jmp         004FA32E
+  004FA29D: mov         edx,dword ptr [ebp-38h]
+  004FA2A0: mov         eax,dword ptr [ebp-3Ch]
+  004FA2A3: push        4E4h
+  004FA2A8: push        9F9880h
+  004FA2AD: push        20h
+  004FA2AF: push        edx
+  004FA2B0: push        eax
+  004FA2B1: call        004D4DB0
+  004FA2B6: mov         esi,eax
+  004FA2B8: add         esp,14h
+  004FA2BB: test        esi,esi
+  004FA2BD: je          004FA27D
+  004FA2BF: mov         ecx,dword ptr [esi+000000D0h]
+  004FA2C5: cmp         byte ptr [ecx+2Dh],21h
+  004FA2C9: jne         004FA27D
+  004FA2CB: call        007FD750
+  004FA2D0: test        al,al
+  004FA2D2: jne         004FA27D
+  004FA2D4: call        004038F0
+  004FA2D9: test        eax,eax
+  004FA2DB: je          004FA2FC
+  004FA2DD: mov         ecx,dword ptr [esi+8]
+  004FA2E0: mov         eax,dword ptr [eax+000000B8h]
+  004FA2E6: mov         esi,dword ptr [ecx]
+  004FA2E8: mov         edi,dword ptr [ecx+4]
+  004FA2EB: push        eax
+  004FA2EC: call        007819C0
+  004FA2F1: add         esp,4
+  004FA2F4: cmp         esi,eax
+  004FA2F6: jne         004FA2FC
+  004FA2F8: cmp         edi,edx
+  004FA2FA: je          004FA27D
+  004FA2FC: lea         edx,[ebp-3Ch]
+  004FA2FF: push        edx
+  004FA300: mov         ecx,ebx
+  004FA302: call        004F8190
+  004FA307: jmp         004FA32E
+  004FA309: call        007FD620
+  004FA30E: test        al,al
+  004FA310: je          004FA31E
+  004FA312: push        1Ch
+  004FA314: call        00616800
+  004FA319: add         esp,4
+  004FA31C: jmp         004FA323
+  004FA31E: call        00616920
+  004FA323: push        0
+  004FA325: push        0
+  004FA327: mov         ecx,ebx
+  004FA329: call        004F5980
+
+Base frame script callback before picking (00490770-004907AA):
+  00490770: push        ebp
+  00490771: mov         ebp,esp
+  00490773: push        ebx
+  00490774: push        esi
+  00490775: mov         esi,ecx
+  00490777: cmp         dword ptr [esi+00000144h],0
+  0049077E: push        edi
+  0049077F: lea         edi,[esi+00000144h]
+  00490785: je          004907AA
+  00490787: call        00817DB0
+  0049078C: fld         dword ptr [ebp+8]
+  0049078F: sub         esp,8
+  00490792: fstp        qword ptr [esp]
+  00490795: push        eax
+  00490796: call        0084E2A0
+  0049079B: add         esp,0Ch
+  0049079E: push        0
+  004907A0: push        1
+  004907A2: push        edi
+  004907A3: mov         ecx,esi
+  004907A5: call        0081A2C0
+  004907AA: mov         eax,dword ptr [esi]
+
+Shared mouseover-token branch (0060AEC2-0060AF25):
+  0060AEC2: mov         ecx,dword ptr [ebp+8]
+  0060AEC5: push        9
+  0060AEC7: push        0A02E6Ch
+  0060AECC: push        ecx
+  0060AECD: call        0076E780
+  0060AED2: test        eax,eax
+  0060AED4: jne         0060AF25
+  0060AED6: mov         edx,dword ptr ds:[00BD07A0h]
+  0060AEDC: add         dword ptr [ebp+8],9
+  0060AEE0: push        118h
+  0060AEE5: mov         dword ptr [esi],edx
+  0060AEE7: mov         eax,dword ptr ds:[00BD07A4h]
+  0060AEEC: push        0A22CD4h
+  0060AEF1: push        8
+  0060AEF3: mov         ecx,eax
+  0060AEF5: push        ecx
+  0060AEF6: push        edx
+  0060AEF7: mov         dword ptr [esi+4],eax
+  0060AEFA: call        004D4DB0
+  0060AEFF: add         esp,14h
+  0060AF02: test        eax,eax
+  0060AF04: jne         0060AD44
+  0060AF0A: push        esi
+  0060AF0B: call        00512A30
+  0060AF10: add         esp,4
+  0060AF13: test        eax,eax
+  0060AF15: jne         0060AD44
+  0060AF1B: mov         dword ptr [esi],eax
+  0060AF1D: mov         dword ptr [esi+4],eax
+  0060AF20: jmp         0060AD4B
+  0060AF25: mov         eax,dword ptr [ebp+8]
+
+Direct action consumer InteractUnit (00527F29-00527FA6):
+  00527F29: push        esi
+  00527F2A: push        0
+  00527F2C: push        1
+  00527F2E: push        edi
+  00527F2F: call        0084E0E0
+  00527F34: add         esp,0Ch
+  00527F37: push        7FFFFFFFh
+  00527F3C: mov         esi,eax
+  00527F3E: push        0A02E6Ch
+  00527F43: push        esi
+  00527F44: call        0076E780
+  00527F49: test        eax,eax
+  00527F4B: jne         00527F5A
+  00527F4D: mov         eax,dword ptr ds:[00BD07A0h]
+  00527F52: mov         edx,dword ptr ds:[00BD07A4h]
+  00527F58: jmp         00527F81
+  00527F5A: fld         dword ptr ds:[009EA8FCh]
+  00527F60: push        0
+  00527F62: push        ecx
+  00527F63: fstp        dword ptr [esp]
+  00527F66: push        0
+  00527F68: push        2
+  00527F6A: push        edi
+  00527F6B: call        00815500
+  00527F70: add         esp,0Ch
+  00527F73: push        eax
+  00527F74: push        0
+  00527F76: push        1
+  00527F78: push        esi
+  00527F79: call        00520190
+  00527F7E: add         esp,18h
+  00527F81: cmp         dword ptr ds:[00D4139Ch],0
+  00527F88: pop         esi
+  00527F89: je          00527F9C
+  00527F8B: push        0
+  00527F8D: push        0
+  00527F8F: call        00513530
+  00527F94: add         esp,8
+  00527F97: xor         eax,eax
+  00527F99: pop         edi
+  00527F9A: pop         ebp
+  00527F9B: ret
+  00527F9C: push        edx
+  00527F9D: push        eax
+  00527F9E: call        005277B0
+  00527FA3: add         esp,8
+  00527FA6: test        eax,eax
+
+Frame GUID setter (004F5980-004F59DF):
+  004F5980: push        ebp
+  004F5981: mov         ebp,esp
+  004F5983: sub         esp,10h
+  004F5986: push        ebx
+  004F5987: mov         ebx,dword ptr [ebp+0Ch]
+  004F598A: push        esi
+  004F598B: mov         esi,ecx
+  004F598D: mov         eax,dword ptr [esi+000002C8h]
+  004F5993: mov         ecx,dword ptr [esi+000002CCh]
+  004F5999: push        edi
+  004F599A: mov         edi,dword ptr [ebp+8]
+  004F599D: cmp         edi,eax
+  004F599F: jne         004F59B0
+  004F59A1: cmp         ebx,ecx
+  004F59A3: jne         004F59B0
+  004F59A5: pop         edi
+  004F59A6: pop         esi
+  004F59A7: xor         eax,eax
+  004F59A9: pop         ebx
+  004F59AA: mov         esp,ebp
+  004F59AC: pop         ebp
+  004F59AD: ret         8
+  004F59B0: mov         dword ptr [ebp-8],eax
+  004F59B3: lea         eax,[ebp-10h]
+  004F59B6: push        eax
+  004F59B7: mov         dword ptr [ebp-10h],edi
+  004F59BA: mov         dword ptr [ebp-0Ch],ebx
+  004F59BD: mov         dword ptr [ebp-4],ecx
+  004F59C0: call        0051FB60
+  004F59C5: add         esp,4
+  004F59C8: mov         dword ptr [esi+000002C8h],edi
+  004F59CE: pop         edi
+  004F59CF: mov         dword ptr [esi+000002CCh],ebx
+  004F59D5: pop         esi
+  004F59D6: mov         eax,1
+  004F59DB: pop         ebx
+  004F59DC: mov         esp,ebp
+  004F59DE: pop         ebp
+  004F59DF: ret         8
+
+New/old GUID publisher wrapper (0051FB60-0051FB7E):
+  0051FB60: push        ebp
+  0051FB61: mov         ebp,esp
+  0051FB63: mov         eax,dword ptr [ebp+8]
+  0051FB66: mov         ecx,dword ptr [eax+0Ch]
+  0051FB69: mov         edx,dword ptr [eax+8]
+  0051FB6C: push        ecx
+  0051FB6D: mov         ecx,dword ptr [eax+4]
+  0051FB70: push        edx
+  0051FB71: mov         edx,dword ptr [eax]
+  0051FB73: push        ecx
+  0051FB74: push        edx
+  0051FB75: call        0051F790
+  0051FB7A: add         esp,10h
+  0051FB7D: pop         ebp
+  0051FB7E: ret
+
+Native GUID/highlight publisher (0051F790-0051F844):
+  0051F790: push        ebp
+  0051F791: mov         ebp,esp
+  0051F793: sub         esp,8
+  0051F796: push        ebx
+  0051F797: push        edi
+  0051F798: call        004D3790
+  0051F79D: push        0A0h
+  0051F7A2: push        9F2340h
+  0051F7A7: push        10h
+  0051F7A9: push        edx
+  0051F7AA: push        eax
+  0051F7AB: call        004D4DB0
+  0051F7B0: mov         ebx,eax
+  0051F7B2: xor         edi,edi
+  0051F7B4: add         esp,14h
+  0051F7B7: cmp         ebx,edi
+  0051F7B9: je          0051F9BD
+  0051F7BF: mov         eax,dword ptr [ebp+10h]
+  0051F7C2: mov         ecx,dword ptr [ebp+14h]
+  0051F7C5: mov         edx,eax
+  0051F7C7: or          edx,ecx
+  0051F7C9: push        esi
+  0051F7CA: jne         0051F7DD
+  0051F7CC: mov         eax,dword ptr ds:[00BD07A0h]
+  0051F7D1: mov         ecx,dword ptr ds:[00BD07A4h]
+  0051F7D7: mov         edx,eax
+  0051F7D9: or          edx,ecx
+  0051F7DB: je          0051F819
+  0051F7DD: push        2B2Fh
+  0051F7E2: push        9FF09Ch
+  0051F7E7: push        1
+  0051F7E9: push        ecx
+  0051F7EA: push        eax
+  0051F7EB: mov         dword ptr ds:[00BD07A0h],edi
+  0051F7F1: mov         dword ptr ds:[00BD07A4h],edi
+  0051F7F7: call        004D4DB0
+  0051F7FC: mov         ecx,dword ptr ds:[00BD0774h]
+  0051F802: add         esp,14h
+  0051F805: mov         esi,eax
+  0051F807: call        0061B290
+  0051F80C: cmp         esi,edi
+  0051F80E: je          0051F819
+  0051F810: push        1
+  0051F812: mov         ecx,esi
+  0051F814: call        00743BC0
+  0051F819: mov         ecx,dword ptr [ebp+0Ch]
+  0051F81C: mov         eax,dword ptr [ebp+8]
+  0051F81F: push        2B37h
+  0051F824: push        9FF09Ch
+  0051F829: push        1
+  0051F82B: push        ecx
+  0051F82C: push        eax
+  0051F82D: mov         dword ptr ds:[00BD07A0h],eax
+  0051F832: mov         dword ptr ds:[00BD07A4h],ecx
+  0051F838: call        004D4DB0
+  0051F83D: mov         esi,eax
+  0051F83F: add         esp,14h
+  0051F842: cmp         esi,edi
+  0051F844: je          0051F9BC
+
+Cursor suppression native helper (004F8190-004F81AE):
+  004F8190: push        ebp
+  004F8191: mov         ebp,esp
+  004F8193: sub         esp,14h
+  004F8196: test        byte ptr [ecx+0000031Ch],2
+  004F819D: mov         dword ptr [ebp-4],ecx
+  004F81A0: je          004F81B1
+  004F81A2: push        0
+  004F81A4: push        0
+  004F81A6: call        004F5980
+  004F81AB: mov         esp,ebp
+  004F81AD: pop         ebp
+  004F81AE: ret         4
+
+Object disappearance invalidation (005243D8-005243F9):
+  005243D8: cmp         esi,dword ptr ds:[00BD07A0h]
+  005243DE: jne         005243F9
+  005243E0: cmp         edi,dword ptr ds:[00BD07A4h]
+  005243E6: jne         005243F9
+  005243E8: mov         ecx,dword ptr ds:[00B7436Ch]
+  005243EE: cmp         ecx,ebx
+  005243F0: je          005243F9
+  005243F2: push        ebx
+  005243F3: push        ebx
+  005243F4: call        004F5980
+  005243F9: cmp         esi,dword ptr ds:[00BD07D0h]
+
+GUID to token representation (0060B3EC-0060B407):
+  0060B3EC: cmp         eax,dword ptr ds:[00BD07A0h]
+  0060B3F2: jne         0060B408
+  0060B3F4: cmp         esi,dword ptr ds:[00BD07A4h]
+  0060B3FA: jne         0060B408
+  0060B3FC: pop         ebx
+  0060B3FD: pop         edi
+  0060B3FE: mov         eax,0A02E6Ch
+  0060B403: pop         esi
+  0060B404: mov         esp,ebp
+  0060B406: pop         ebp
+  0060B407: ret
+
+Additional GUID to token comparison (0060B692-0060B6A6):
+  0060B692: cmp         eax,dword ptr ds:[00BD07A0h]
+  0060B698: jne         0060B6A6
+  0060B69A: cmp         esi,dword ptr ds:[00BD07A4h]
+  0060B6A0: je          0060BB61
+  0060B6A6: push        1FCh
+
+Additional GUID to token comparison (0060BB2E-0060BB6C):
+  0060BB2E: mov         ecx,dword ptr ds:[00BD07A4h]
+  0060BB34: mov         eax,esi
+  0060BB36: or          eax,edi
+  0060BB38: mov         eax,dword ptr ds:[00BD07A0h]
+  0060BB3D: je          0060BB47
+  0060BB3F: cmp         esi,eax
+  0060BB41: jne         0060BB47
+  0060BB43: cmp         edi,ecx
+  0060BB45: je          0060BB61
+  0060BB47: mov         esi,ebx
+  0060BB49: or          esi,edx
+  0060BB4B: je          0060B6FE
+  0060BB51: cmp         ebx,eax
+  0060BB53: jne         0060B6FE
+  0060BB59: cmp         edx,ecx
+  0060BB5B: jne         0060B6FE
+  0060BB61: pop         edi
+  0060BB62: pop         ebx
+  0060BB63: mov         eax,0A02E6Ch
+  0060BB68: pop         esi
+  0060BB69: mov         esp,ebp
+  0060BB6B: pop         ebp
+  0060BB6C: ret
+
+Diagnostic cached selection (00404C48-00404C7F):
+  00404C48: mov         ecx,dword ptr ds:[00BD07A4h]
+  00404C4E: mov         edx,dword ptr ds:[00BD07A0h]
+  00404C54: push        14F7h
+  00404C59: push        9E0E94h
+  00404C5E: push        1
+  00404C60: push        ecx
+  00404C61: push        edx
+  00404C62: call        004D4DB0
+  00404C67: add         esp,14h
+  00404C6A: test        eax,eax
+  00404C6C: je          00404C7F
+  00404C6E: push        ebx
+  00404C6F: push        edi
+  00404C70: push        9E2334h
+  00404C75: mov         esi,eax
+  00404C77: call        00403460
+  00404C7C: add         esp,0Ch
+  00404C7F: mov         eax,dword ptr ds:[00BD07ACh]
+
+Existing object highlight refresh (00513D12-00513D90):
+  00513D12: mov         eax,dword ptr ds:[00BD07A0h]
+  00513D17: mov         ecx,dword ptr ds:[00BD07A4h]
+  00513D1D: mov         edx,eax
+  00513D1F: or          edx,ecx
+  00513D21: je          00513D51
+  00513D23: push        36FCh
+  00513D28: push        9FF09Ch
+  00513D2D: push        1
+  00513D2F: push        ecx
+  00513D30: push        eax
+  00513D31: call        004D4DB0
+  00513D36: mov         ecx,eax
+  00513D38: add         esp,14h
+  00513D3B: test        ecx,ecx
+  00513D3D: je          00513D51
+  00513D3F: test        esi,esi
+  00513D41: push        1
+  00513D43: je          00513D4C
+  00513D45: call        00743C70
+  00513D4A: jmp         00513D51
+  00513D4C: call        00743BC0
+  00513D51: mov         eax,dword ptr ds:[00BD07B0h]
+  00513D56: mov         ecx,dword ptr ds:[00BD07B4h]
+  00513D5C: mov         edx,eax
+  00513D5E: or          edx,ecx
+  00513D60: je          00513D90
+  00513D62: push        3708h
+  00513D67: push        9FF09Ch
+  00513D6C: push        1
+  00513D6E: push        ecx
+  00513D6F: push        eax
+  00513D70: call        004D4DB0
+  00513D75: mov         ecx,eax
+  00513D77: add         esp,14h
+  00513D7A: test        ecx,ecx
+  00513D7C: je          00513D90
+  00513D7E: test        esi,esi
+  00513D80: push        0
+  00513D82: je          00513D8B
+  00513D84: call        00743C70
+  00513D89: pop         esi
+  00513D8A: ret
+  00513D8B: call        00743BC0
+  00513D90: pop         esi

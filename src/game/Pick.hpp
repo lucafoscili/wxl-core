@@ -159,7 +159,7 @@ namespace wxl::game::world
     }
 
     /**
-     * @brief Picks the world under the current cursor.
+     * @brief Picks the world under the current cursor without publishing native mouseover state.
      * @param out  receives the hit; cleared on a miss.
      * @return the hit type (0 miss, 2 M2/doodad, 3 terrain/WMO).
      */

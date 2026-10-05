@@ -130,8 +130,12 @@ namespace wxl::game::world
     { Native<woff::World_RenderFn>(woff::kRender)(viewerPos, flags); }
 
     /**
-     * @brief Reads the GUID of the unit under the cursor.
+     * @brief Reads the native cached GUID of the unit under the cursor.
      * @return The mouseover GUID.
+     *
+     * PickCursor returns a fresh hit without publishing this GUID. Native frame hover dispatch
+     * owns publication and its highlight/UI side effects; action consumers can read this cache
+     * directly (InteractUnit) or through the shared mouseover-token resolver.
      */
     inline unsigned long long MouseoverGuid()
     { return *reinterpret_cast<unsigned long long*>(off::kMouseoverGuid); }

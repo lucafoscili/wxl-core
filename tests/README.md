@@ -409,7 +409,7 @@ picking-proxy behavior decision is inferred.
 
 ### Passive hover throttle boundary - 5 October 2026
 
-**Discussion only; no throttle implemented.** A bounded read of the same 12340
+**Proposed policy; no throttle implemented.** A bounded read of the same 12340
 client found two direct native origins of `PickAtScreen` (`0x4F9DA0`):
 
 | Origin | Observed behavior |
@@ -452,4 +452,70 @@ movement or animation inside the 100 ms window can briefly retain an old
 highlight/tooltip; this policy does not promise instant detection of every new
 target. It deliberately accepts that visual age while requiring fresh action
 selection. No performance saving or live behavior has been measured for it, and
-no throttle, build or installation is authorized by this discussion.
+no throttle, build or installation has been produced by this investigation.
+
+#### Bounded action-consumer follow-up
+
+Luca subsequently accepted the brief stale-highlight tradeoff for a reversible
+Beta trial. Implementation still depends on a correct action refresh; this is
+a technical gap, not another approval requirement. The additional read-only
+12340 capture is [native_mouseover_boundary.txt](native_mouseover_boundary.txt).
+The original client hash above was rechecked and matched. These are instruction
+and registration-table observations, not an executed client ABI fixture.
+
+The eleven direct references to the low cached GUID word were classified:
+
+| Instruction | Observed role |
+| --- | --- |
+| `0x404C4E` | Object diagnostic output (`Current Object Track`); reads cached selection. |
+| `0x513D12` | Refreshes highlighting of existing mouseover/target objects; does not select an action target. |
+| `0x51F7CC` | Prior-GUID read in native mouseover publication. |
+| `0x51F7EB`, `0x51F82D` | Clears old GUID / writes new GUID in that publisher. |
+| `0x5243D8` | Object-disappearance invalidation; clears matching hover through the world-frame setter. |
+| `0x527F4D` | **Action consumer:** Lua `InteractUnit`, with a direct `mouseover` branch. |
+| `0x60AED6` | **Selection consumer:** shared unit-token resolver's `mouseover` branch; includes suffixed-unit handling. Its callers still need action-versus-presentation coverage. |
+| `0x60B3EC`, `0x60B692`, `0x60BB38` | GUID-to-unit-token representation; comparisons can return the `mouseover` literal. These instructions do not perform picking or actions. |
+
+`InteractUnit` is registered at `0xAC8350` as name pointer `0x9FE01C`, callback
+`0x527F00`. It compares its argument with the literal at `0xA02E6C`, reads both
+cached GUID words at `0x527F4D` / `0x527F52`, and passes the result toward native
+interaction at `0x527F9E`. It bypasses the shared token resolver (`0x60ABF0`),
+whose matching prefix branch begins at `0x60AEC2` and reads at `0x60AED6`.
+Two consumer hooks invoking one refresh owner are a plausible implementation;
+the second consumer alone does not make the trial infeasible. Refreshing on every
+mouseover-token query could also bypass the passive saving when UI scripts poll
+it frequently. That frequency remains unmeasured.
+
+The world-frame setter at `0x4F5980` takes the new GUID as two stack words
+(`__thiscall`, `ret 8`). It returns early when frame `0x2C8/0x2CC` already matches;
+otherwise it passes `{newLo,newHi,oldLo,oldHi}` to `0x51FB60`, which calls
+`0x51F790` (`__cdecl`, four stack words). The publisher requires an active player,
+clears/publishes `0xBD07A0/0xBD07A4`, and applies highlight and UI side effects.
+Raw global writes would bypass this owner. Calling it with every picked GUID is
+also insufficient: native frame dispatch at `0x4FA260` first chooses among
+miss/targeting/object paths; its type-3 branch checks object kind and additional
+eligibility before choosing the native helper. `0x4F8190` itself checks cursor
+suppression (`frame+0x31C`, bit 1). A fresh hit is not that dispatch result.
+
+**Precise remaining gap:** no callable hover-only pick-and-publish entry was
+established. The observed dispatch is an internal frame continuation, requiring
+EBX=frame, EBP locals for hit/type and a matching prologue/epilogue. Replaying the
+whole frame update is not a safe shortcut: before picking, `0x4FA052` calls
+base-frame update `0x490770`; at `0x490787..0x4907A5` that entry pushes the delta
+onto Lua's stack and invokes a frame script handler, then visits child callbacks.
+An action refresh could therefore invoke another action before publishing the
+new target. A reentrancy guard alone would let that nested consumer see stale
+state; zero delta does not suppress these calls.
+
+Keep runtime behavior unchanged. The next bounded implementation question is a
+verified native hover-only continuation with an executable ABI/reentrancy fixture,
+or an evidence-backed shared refresh that retains native eligibility and publisher
+semantics for all hit types. Extend the existing exact-client offline fixture
+conventions: drive the proposed continuation with a fresh hit through all four
+native dispatch branches and cursor/eligibility loss, asserting stack/register
+restoration and new GUID publication before a nested action. This is one focused
+fixture for the missing boundary, not a new test framework.
+This follow-up added no policy implementation,
+benchmark, DLL, installation or live test, and changes none of the large-model
+picking, native fallback or physics paths. Existing benchmark build instructions
+above still apply; there is no hover-throttle candidate to compose or install.
