@@ -115,7 +115,19 @@ namespace wxl::offsets::game::unit
     constexpr size_t kOffPlayerSetupFlags = 0xF42;       // byte; bit 1 enables the bypass (0x006DE840)
     constexpr size_t kOffObjectFields = 0x08;            // -> object fields: guid, then type mask at +8
 
+    // Per-frame unit prep (this = unit, three stack args): runs the deferred setup below while the
+    // pending bit is set. Setup itself (this = unit, no stack args) returns 0 without a component
+    // while the bound instance (+0xB4) is missing or not ready, keeping the bit.
+    constexpr uintptr_t kUnitPrep = 0x00730F30;
+    constexpr uintptr_t kCharSetup = 0x00730100;
+    constexpr size_t kOffUnitInstance = 0xB4;
+    constexpr size_t kOffUnitDescriptor = 0xD0;          // -> unit fields
+    constexpr size_t kOffFieldDisplayId = 0xF4;          // UNIT_FIELD_DISPLAYID
+    constexpr size_t kOffFieldFlags2 = 0xD8;             // UNIT_FIELD_FLAGS_2 (0x10: mirror image)
+
     // --- signatures ---
+    using UnitPrepFn         = void(__fastcall*)(void* unit, void* edx, void* a, void* b, void* c);
+    using CharSetupFn        = int(__fastcall*)(void* unit, void* edx);
     using CharSetupCreateFn  = int(__fastcall*)(void* unit, void* edx, void* appearance, int extended);
     using GetObjectFn        = void*(__cdecl*)(unsigned long long guid, unsigned typemask,
                                                const char* tag, int flag);

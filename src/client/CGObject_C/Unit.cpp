@@ -171,8 +171,88 @@ namespace
         return result;
     }
 
+    /**
+     * Trial trace and kick for the same stall: a unit shown through a Velora display (id >= 100000)
+     * with an extended row whose bound instance exists, yet which has no character component and no
+     * pending setup, gets the pending bit set, up to kSetupKicks times; setup's outcome for such
+     * units is logged whenever its state changes. Bounded: 16 units, 96 lines.
+     */
+    unit::UnitPrepFn g_origUnitPrep = nullptr;
+    unit::CharSetupFn g_origCharSetup = nullptr;
+    struct SetupWatch { void* unit; uint64_t guid; uint32_t kicks; uint32_t signature; };
+    SetupWatch g_watches[16] = {};
+    uint32_t g_watchLines = 0;
+    constexpr uint32_t kSetupKicks = 600;
+
+    SetupWatch* Watch(void* self)
+    {
+        const void* fields = Read<void*>(self, unit::kOffUnitDescriptor);
+        if (!self || !fields || !Read<void*>(self, unit::kOffUnitDisplayExtra)
+            || Read<uint32_t>(fields, unit::kOffFieldDisplayId) < 100000u)
+            return nullptr;
+        const uint64_t id = Read<uint64_t>(Read<void*>(self, unit::kOffObjectFields), 0);
+        for (auto& watch : g_watches)
+            if (watch.unit == self && watch.guid == id) return &watch;
+        for (auto& watch : g_watches)
+            if (!watch.unit || watch.unit == self) { watch = { self, id, 0, 0 }; return &watch; }
+        return nullptr;
+    }
+
+    void TraceSetup(const char* where, void* self, SetupWatch& watch, int result)
+    {
+        void* instance = Read<void*>(self, unit::kOffUnitInstance);
+        void* shared = Read<void*>(instance, 0x2C);
+        const void* fields = Read<void*>(self, unit::kOffUnitDescriptor);
+        const uint32_t flags = Read<uint32_t>(self, unit::kOffUnitCharFlags);
+        const uint32_t initFlags = Read<uint32_t>(instance, 0x10), sharedFlags = Read<uint32_t>(shared, 8);
+        void* component = Read<void*>(self, unit::kOffUnitCharComponent);
+        uint32_t signature = 2166136261u;
+        for (const char* c = where; *c; ++c) signature = (signature ^ uint8_t(*c)) * 16777619u;
+        for (const uint32_t value : { uint32_t(result + 2), flags & (unit::kCharSetupPending | 0x20000u),
+                                      uint32_t(instance != nullptr), initFlags & 1u, sharedFlags & 6u,
+                                      uint32_t(component != nullptr) })
+            signature = (signature ^ value) * 16777619u;
+        if (signature == watch.signature || g_watchLines >= 96)
+            return;
+        watch.signature = signature;
+        ++g_watchLines;
+        WLOG_INFO("unit: setup-trace record=%u where=%s result=%d unit=%p display=%u flags=0x%X flags2=0x%X "
+                  "instance=%p initFlags=0x%X shared=%p sharedFlags=0x%X component=%p kicks=%u",
+                  g_watchLines, where, result, self, Read<uint32_t>(fields, unit::kOffFieldDisplayId), flags,
+                  Read<uint32_t>(fields, unit::kOffFieldFlags2), instance, initFlags, shared, sharedFlags,
+                  component, watch.kicks);
+        wxl::log::Flush();
+    }
+
+    void __fastcall hkUnitPrep(void* self, void* edx, void* a, void* b, void* c)
+    {
+        if (SetupWatch* watch = Watch(self))
+        {
+            TraceSetup("prep", self, *watch, 0);
+            auto& flags = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(self) + unit::kOffUnitCharFlags);
+            if (!Read<void*>(self, unit::kOffUnitCharComponent) && Read<void*>(self, unit::kOffUnitInstance)
+                && !(flags & (unit::kCharSetupPending | 0x20000u)) && watch->kicks < kSetupKicks)
+            {
+                TraceSetup("kick", self, *watch, -1);
+                ++watch->kicks;
+                flags |= unit::kCharSetupPending;
+            }
+        }
+        g_origUnitPrep(self, edx, a, b, c);
+    }
+
+    int __fastcall hkCharSetup(void* self, void* edx)
+    {
+        const int result = g_origCharSetup(self, edx);
+        if (SetupWatch* watch = Watch(self))
+            TraceSetup("setup", self, *watch, result);
+        return result;
+    }
+
     bool InstallUnit()
     {
+        wxl::hook::Install("UnitPrep", unit::kUnitPrep, &hkUnitPrep, &g_origUnitPrep);
+        wxl::hook::Install("CharSetup", unit::kCharSetup, &hkCharSetup, &g_origCharSetup);
         wxl::hook::Install("CharSetupCreate", unit::kCharSetupCreate, &hkCharSetupCreate, &g_origCharSetupCreate);
         wxl::hook::Install("ObjectUpdate", unit::kObjectUpdateHandler, &hkObjUpdate, &g_origObjUpdate);
         wxl::hook::Install("ObjectDestroy", unit::kObjectDestroyHandler, &hkObjDestroy, &g_origObjDestroy);
