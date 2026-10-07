@@ -101,7 +101,7 @@ namespace
      * login. Bounded log lines say each unit's first refusal, its eventual setup and any exhaustion.
      */
     unit::CharSetupCreateFn g_origCharSetupCreate = nullptr;
-    struct SetupRetry { void* unit; uint32_t tries; bool logged; };
+    struct SetupRetry { void* unit; uint64_t guid; uint32_t tries; bool logged; };
     SetupRetry g_setupRetries[16] = {};
     uint32_t g_setupLogs = 0;
     constexpr uint32_t kSetupRetries = 900;
@@ -119,13 +119,18 @@ namespace
         const bool player = (Read<uint32_t>(fields, 8) & unit::kTypeMaskPlayer) != 0;
         if (!self || !extra || !extended || appearance || !player)
             return result;
+        // A unit is its address and GUID: a new unit at a reused address starts afresh. A slot whose
+        // budget is spent is the first to give way, so spent units never starve later ones.
+        const uint64_t id = Read<uint64_t>(fields, 0);
         SetupRetry* slot = nullptr;
         for (auto& retry : g_setupRetries)
-            if (retry.unit == self || (!slot && !retry.unit)) { slot = &retry; if (retry.unit) break; }
+            if (retry.unit == self && retry.guid == id) { slot = &retry; break; }
+        if (!slot)
+            for (auto& retry : g_setupRetries)
+                if (!retry.unit || retry.unit == self || retry.tries > kSetupRetries) { slot = &retry; break; }
         if (!slot)
             return result;
-        const bool fresh = slot->unit != self;
-        if (fresh) *slot = { self, 0, false };
+        if (slot->unit != self || slot->guid != id) *slot = { self, id, 0, false };
         const char* bake = Read<const char*>(extra, unit::kOffDisplayExtraBakeName);
         const auto guid = reinterpret_cast<unit::ActivePlayerGuidFn>(unit::kActivePlayerGuid)();
         void* local = guid ? reinterpret_cast<unit::GetObjectFn>(unit::kGetObjectByGuid)(guid, unit::kTypeMaskObject,
