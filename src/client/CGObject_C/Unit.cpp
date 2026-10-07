@@ -22,6 +22,8 @@
 #include "common/Log.hpp"
 #include "offsets/game/Unit.hpp"
 
+#include <cstdint>
+
 namespace
 {
     namespace ev   = wxl::events;
@@ -91,8 +93,82 @@ namespace
         return r;
     }
 
+    /**
+     * Trial candidate for the fresh-login invisibility (wow/queued/features/login-invisibility):
+     * a player unit shown through an extended display row whose setup returned before CharInit gets
+     * its pending bit back, so deferred prep retries it, up to kSetupRetries times per unit. The
+     * native bypass needs a local-player bit (+0xF42) that is not yet set when companions arrive at
+     * login. Bounded log lines say each unit's first refusal, its eventual setup and any exhaustion.
+     */
+    unit::CharSetupCreateFn g_origCharSetupCreate = nullptr;
+    struct SetupRetry { void* unit; uint32_t tries; bool logged; };
+    SetupRetry g_setupRetries[16] = {};
+    uint32_t g_setupLogs = 0;
+    constexpr uint32_t kSetupRetries = 900;
+
+    template<class T> T Read(const void* base, size_t offset)
+    {
+        return base ? *reinterpret_cast<const T*>(static_cast<const uint8_t*>(base) + offset) : T{};
+    }
+
+    int __fastcall hkCharSetupCreate(void* self, void* edx, void* appearance, int extended)
+    {
+        const int result = g_origCharSetupCreate(self, edx, appearance, extended);
+        void* extra = Read<void*>(self, unit::kOffUnitDisplayExtra);
+        const void* fields = Read<void*>(self, unit::kOffObjectFields);
+        const bool player = (Read<uint32_t>(fields, 8) & unit::kTypeMaskPlayer) != 0;
+        if (!self || !extra || !extended || appearance || !player)
+            return result;
+        SetupRetry* slot = nullptr;
+        for (auto& retry : g_setupRetries)
+            if (retry.unit == self || (!slot && !retry.unit)) { slot = &retry; if (retry.unit) break; }
+        if (!slot)
+            return result;
+        const bool fresh = slot->unit != self;
+        if (fresh) *slot = { self, 0, false };
+        const char* bake = Read<const char*>(extra, unit::kOffDisplayExtraBakeName);
+        const auto guid = reinterpret_cast<unit::ActivePlayerGuidFn>(unit::kActivePlayerGuid)();
+        void* local = guid ? reinterpret_cast<unit::GetObjectFn>(unit::kGetObjectByGuid)(guid, unit::kTypeMaskObject,
+                                                                                         "wxl-setup", 0) : nullptr;
+        const uint32_t localBit = (Read<uint8_t>(local, unit::kOffPlayerSetupFlags) >> 1) & 1u;
+        if (result)
+        {
+            if (slot->tries && g_setupLogs < 64)
+            {
+                ++g_setupLogs;
+                WLOG_INFO("unit: character setup unit=%p display=%u extra=%u succeeded after %u retries (localBit=%u)",
+                          self, Read<uint32_t>(Read<void*>(self, unit::kOffUnitDisplayInfo), 0),
+                          Read<uint32_t>(extra, 0), slot->tries, localBit);
+                wxl::log::Flush();
+            }
+            slot->unit = nullptr;
+            return result;
+        }
+        if (!slot->logged && g_setupLogs < 64)
+        {
+            slot->logged = true;
+            ++g_setupLogs;
+            WLOG_INFO("unit: character setup unit=%p display=%u extra=%u returned before CharInit: localBit=%u "
+                      "extraFlags=0x%X modelFlags=0x%X bake=%s; retrying", self,
+                      Read<uint32_t>(Read<void*>(self, unit::kOffUnitDisplayInfo), 0), Read<uint32_t>(extra, 0),
+                      localBit, Read<uint32_t>(extra, unit::kOffDisplayExtraFlags),
+                      Read<uint32_t>(Read<void*>(self, unit::kOffUnitModelData), unit::kOffModelDataFlags),
+                      bake && *bake ? bake : "(empty)");
+            wxl::log::Flush();
+        }
+        if (slot->tries++ < kSetupRetries)
+            *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(self) + unit::kOffUnitCharFlags) |= unit::kCharSetupPending;
+        else if (slot->tries == kSetupRetries + 1 && g_setupLogs < 64)
+        {
+            ++g_setupLogs;
+            WLOG_WARN("unit: character setup unit=%p gave up after %u retries (localBit=%u)", self, kSetupRetries, localBit);
+        }
+        return result;
+    }
+
     bool InstallUnit()
     {
+        wxl::hook::Install("CharSetupCreate", unit::kCharSetupCreate, &hkCharSetupCreate, &g_origCharSetupCreate);
         wxl::hook::Install("ObjectUpdate", unit::kObjectUpdateHandler, &hkObjUpdate, &g_origObjUpdate);
         wxl::hook::Install("ObjectDestroy", unit::kObjectDestroyHandler, &hkObjDestroy, &g_origObjDestroy);
         wxl::hook::Install("TargetSet", unit::kTargetSet, &hkTargetSet, &g_origTargetSet);

@@ -96,7 +96,28 @@ namespace wxl::offsets::game::unit
     constexpr uint32_t kTypeMaskDynamicObject = 0x40;
     constexpr uint32_t kTypeMaskCorpse        = 0x80;
 
+    // --- character appearance setup (deferred unit prep) ---
+    // Creates and sets up a unit's character component from its extended display row (this = unit,
+    // stack: player-appearance source or null, nonzero to use the extended row) -> 1 once CharInit
+    // ran. With neither the local-player bypass (0x006DE840, then 0x0071C500) nor a non-empty
+    // extended bake name (+0x50) it returns 0 after allocating the component, while its caller
+    // (0x00730100) has already cleared the pending bit below, so no later prep retries it.
+    constexpr uintptr_t kCharSetupCreate = 0x0071D010;
+    constexpr size_t kOffUnitCharFlags = 0xA30;          // uint32; bit kCharSetupPending queues setup
+    constexpr uint32_t kCharSetupPending = 0x00400000;
+    constexpr size_t kOffUnitDisplayInfo = 0x968;        // -> CreatureDisplayInfo row (id first)
+    constexpr size_t kOffUnitDisplayExtra = 0x96C;       // -> CreatureDisplayInfoExtra row (id first)
+    constexpr size_t kOffUnitModelData = 0x970;          // -> CreatureModelData row
+    constexpr size_t kOffUnitCharComponent = 0xB4C;      // -> character component
+    constexpr size_t kOffDisplayExtraFlags = 0x4C;       // flag 0x1 admits the bypass with model flag 0x4
+    constexpr size_t kOffDisplayExtraBakeName = 0x50;    // -> baked texture name, may be empty
+    constexpr size_t kOffModelDataFlags = 0x04;
+    constexpr size_t kOffPlayerSetupFlags = 0xF42;       // byte; bit 1 enables the bypass (0x006DE840)
+    constexpr size_t kOffObjectFields = 0x08;            // -> object fields: guid, then type mask at +8
+    constexpr uint32_t kTypeMaskPlayer = 0x10;
+
     // --- signatures ---
+    using CharSetupCreateFn  = int(__fastcall*)(void* unit, void* edx, void* appearance, int extended);
     using GetObjectFn        = void*(__cdecl*)(unsigned long long guid, unsigned typemask,
                                                const char* tag, int flag);
     using ActivePlayerGuidFn = unsigned long long(__cdecl*)();
