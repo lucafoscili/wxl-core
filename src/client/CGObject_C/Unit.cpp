@@ -270,8 +270,77 @@ namespace
         return result;
     }
 
+    /**
+     * Trial drive for the same stall: trial 08e showed the engine never prepares or sets up these
+     * units on a fresh login (no prep, no setup call), while /reloadui does. Every 15th frame, each
+     * resident player unit on a Velora display whose instance exists but whose component is missing
+     * or not yet attached gets the native setup called once, up to kDriveTries times per unit.
+     * Setup itself waits for a ready instance, so an unready model only costs a check.
+     */
+    struct Drive { uint64_t guid; uint32_t tries; bool logged; };
+    Drive g_drives[16] = {};
+    uint32_t g_driveFrames = 0, g_driveLines = 0;
+    constexpr uint32_t kDriveTries = 240;
+
+    int __cdecl DriveStep(uint32_t low, uint32_t high, void*)
+    {
+        const uint64_t guid = (uint64_t(high) << 32) | low;
+        void* self = reinterpret_cast<unit::GetObjectFn>(unit::kGetObjectByGuid)(guid, unit::kTypeMaskPlayer,
+                                                                                "wxl-setup-drive", 0);
+        if (!self || !Velora(self) || !Read<void*>(self, unit::kOffUnitInstance))
+            return 1;
+        void* component = Read<void*>(self, unit::kOffUnitCharComponent);
+        const void* fields = Read<void*>(self, unit::kOffUnitDescriptor);
+        if ((component && Read<void*>(component, kOffComponentInstance))
+            || (Read<uint32_t>(fields, unit::kOffFieldFlags2) & 0x10u)
+            || (Read<uint32_t>(self, unit::kOffUnitCharFlags) & 0x20000u))
+            return 1;
+        Drive* slot = nullptr;
+        for (auto& drive : g_drives)
+            if (drive.guid == guid) { slot = &drive; break; }
+        if (!slot)
+            for (auto& drive : g_drives)
+                if (!drive.guid || drive.tries > kDriveTries) { drive = { guid, 0, false }; slot = &drive; break; }
+        if (!slot || slot->tries > kDriveTries)
+            return 1;
+        ++slot->tries;
+        void* instance = Read<void*>(self, unit::kOffUnitInstance);
+        if (!slot->logged && g_driveLines < 48)
+        {
+            slot->logged = true;
+            ++g_driveLines;
+            WLOG_INFO("unit: setup-drive unit=%p display=%u component=%p attached=%p instance=%p initFlags=0x%X "
+                      "sharedFlags=0x%X flags=0x%X: the engine left it unset; calling setup",
+                      self, Read<uint32_t>(fields, unit::kOffFieldDisplayId), component,
+                      Read<void*>(component, kOffComponentInstance), instance, Read<uint32_t>(instance, 0x10),
+                      Read<uint32_t>(Read<void*>(instance, 0x2C), 8), Read<uint32_t>(self, unit::kOffUnitCharFlags));
+            wxl::log::Flush();
+        }
+        const int result = reinterpret_cast<unit::CharSetupFn>(unit::kCharSetup)(self, nullptr);
+        const bool spent = !result && slot->tries >= kDriveTries;
+        if ((result || spent) && g_driveLines < 48)
+        {
+            ++g_driveLines;
+            WLOG_INFO("unit: setup-drive unit=%p %s after %u calls", self, result ? "set up" : "gave up", slot->tries);
+            wxl::log::Flush();
+        }
+        if (result)
+            slot->guid = 0;                 // done: free the slot
+        else if (spent)
+            slot->tries = kDriveTries + 1;  // spent: later passes skip it, and the slot may be reused
+        return 1;
+    }
+
+    void OnUpdateDrive(void*, const void*)
+    {
+        if (++g_driveFrames % 15)
+            return;
+        reinterpret_cast<unit::EnumObjectsFn>(unit::kEnumObjects)(&DriveStep, nullptr);
+    }
+
     bool InstallUnit()
     {
+        wxl::events::Subscribe(wxl::events::Event::OnUpdate, &OnUpdateDrive, nullptr);
         wxl::hook::Install("UnitPrep", unit::kUnitPrep, &hkUnitPrep, &g_origUnitPrep);
         wxl::hook::Install("CharSetup", unit::kCharSetup, &hkCharSetup, &g_origCharSetup);
         wxl::hook::Install("CharSetupCreate", unit::kCharSetupCreate, &hkCharSetupCreate, &g_origCharSetupCreate);
