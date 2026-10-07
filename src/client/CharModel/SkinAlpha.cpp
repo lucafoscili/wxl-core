@@ -26,6 +26,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 
 namespace
 {
@@ -73,6 +74,53 @@ namespace
     }
 
     using wxl::client::custombody::ModelStem;
+
+    /**
+     * Trial diagnostic for the fresh-login stall (wow/queued/features/login-invisibility/FIRST-DRAW.md):
+     * a custom body's sheet state at each seam, written only when it changes, for at most 32
+     * components and 96 lines. Fields are read, never written; no native function is called.
+     */
+    struct SheetTrace { void* component; uint32_t signature; };
+    SheetTrace g_traces[32] = {};
+    uint32_t g_traceLines = 0;
+
+    void TraceSheet(const char* where, void* component, int result)
+    {
+        if (!component || g_traceLines >= 96)
+            return;
+        const char* stem = ModelStem(component);
+        if (!sa::IsCustomBody(stem))
+            return;
+        auto* base = static_cast<uint8_t*>(component);
+        void* request = *reinterpret_cast<void**>(base + m2::kOffCharComponentComposeRequest);
+        void* instance = *reinterpret_cast<void**>(base + m2::kOffCharComponentInstance);
+        const uint32_t rebuild = Field(component, m2::kOffCharComponentRebuild);
+        const uint32_t dirty = Field(component, m2::kOffCharComponentDirty);
+        const uint32_t format = Field(component, m2::kOffCharComponentFormat);
+        const uint32_t sheet = Field(component, m2::kOffCharComponentSheet);
+        const uint32_t requestFlags = Field(request, 0), requestFormat = Field(request, m2::kOffComposeRequestFormat);
+        const uint32_t initFlags = Field(instance, m2::kOffInstInitFlags);
+        uint32_t signature = 2166136261u;
+        for (const char* c = where; *c; ++c)
+            signature = (signature ^ uint8_t(*c)) * 16777619u;
+        for (const uint32_t value : { uint32_t(result + 1),
+                                      rebuild & 1u, uint32_t(dirty != 0), format, uint32_t(sheet != 0),
+                                      uint32_t(request != nullptr), requestFlags & 7u, initFlags & 3u })
+            signature = (signature ^ value) * 16777619u;
+        SheetTrace* slot = nullptr;
+        for (auto& trace : g_traces)
+            if (trace.component == component || (!slot && !trace.component)) { slot = &trace; if (trace.component) break; }
+        if (!slot || (slot->component == component && slot->signature == signature))
+            return;
+        slot->component = component;
+        slot->signature = signature;
+        ++g_traceLines;
+        WLOG_INFO("skin-alpha: sheet-trace record=%u where=%s result=%d component=%p stem=%s rebuild=0x%X "
+                  "dirty=0x%X format=%u sheet=%u request=%p requestFlags=0x%X requestFormat=%u "
+                  "instance=%p initFlags=0x%X", g_traceLines, where, result, component, stem, rebuild,
+                  dirty, format, sheet, request, requestFlags, requestFormat, instance, initFlags);
+        wxl::log::Flush();
+    }
 
     bool CustomSheet(void* component)
     {
@@ -152,7 +200,9 @@ namespace
     bool __fastcall hkCheckBaseTextures(void* component, void* edx, uint32_t wait)
     {
         UncompressCustomBody(component);
-        return g_origCheckBaseTextures(component, edx, wait);
+        const bool ready = g_origCheckBaseTextures(component, edx, wait);
+        TraceSheet(wait ? "check-wait" : "check", component, ready ? 1 : 0);
+        return ready;
     }
 
     /// As the component attaches to its model: the earliest point its model is known.
@@ -161,6 +211,7 @@ namespace
         const bool ok = g_origCharInit(component, edx, setup, flags);
         if (ok)
             UncompressCustomBody(component);
+        TraceSheet("init", component, ok ? 1 : 0);
         return ok;
     }
 
@@ -190,6 +241,7 @@ namespace
         UncompressCustomBody(component);
         sa::SheetScope scope(t_customSheet, CustomSheet(component));
         g_origSubmitRequest(component, edx);
+        TraceSheet("submit", component, -1);
     }
 
     void* __cdecl hkAllocateRequest()
@@ -204,6 +256,7 @@ namespace
     {
         UncompressCustomBody(component);
         g_origCreateBaseTexture(component, edx);
+        TraceSheet("sheet", component, -1);
     }
 
     bool InstallSkinAlpha()
