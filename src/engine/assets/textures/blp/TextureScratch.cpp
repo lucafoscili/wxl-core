@@ -30,8 +30,9 @@
 // leaves the client untouched.
 //
 // The async read budget is the streaming half of the same limit: a texture file larger than the
-// client's 4 MB in-flight budget is never admitted, so a 2048 32-bpp texture requested in the world
-// waits until a loading screen or /reloadui forces it, and its model stays undrawn until then.
+// client's 4 MB in-flight budget is never admitted, so a large texture requested in the world waits
+// until a loading screen or /reloadui forces it, and its model stays undrawn until then. Both operands
+// change together or not at all: one widened site alone would still park a large read forever.
 namespace wxl::modern::assets::textures::blp
 {
     namespace
@@ -72,10 +73,21 @@ namespace wxl::modern::assets::textures::blp
                     return true;
                 }
             }
-            for (uintptr_t site : sites)
-                wxl::mem::Patch(reinterpret_cast<void*>(site), &gxoff::kTexReadBudgetWide,
-                                      sizeof(uint32_t));
-            WLOG_INFO("texture: async read budget widened to %u MB (2048-wide chains stream)",
+            if (!wxl::mem::Patch(reinterpret_cast<void*>(sites[0]), &gxoff::kTexReadBudgetWide, sizeof(uint32_t)))
+            {
+                WLOG_INFO("texture: read-budget operand at %08X could not be written - not patched",
+                          uint32_t(sites[0]));
+                return true;
+            }
+            if (!wxl::mem::Patch(reinterpret_cast<void*>(sites[1]), &gxoff::kTexReadBudgetWide, sizeof(uint32_t)))
+            {
+                const bool restored = wxl::mem::Patch(reinterpret_cast<void*>(sites[0]),
+                                                      &gxoff::kTexReadBudgetStock, sizeof(uint32_t));
+                WLOG_INFO("texture: read-budget operand at %08X could not be written - %s",
+                          uint32_t(sites[1]), restored ? "stock budget restored" : "first operand left widened");
+                return true;
+            }
+            WLOG_INFO("texture: async read budget widened to %u MB (large texture files stream)",
                       gxoff::kTexReadBudgetWide >> 20);
             return true;
         }
