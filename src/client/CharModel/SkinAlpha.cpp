@@ -77,21 +77,26 @@ namespace
 
     /**
      * Trial diagnostic for the fresh-login stall (wow/queued/features/login-invisibility/FIRST-DRAW.md):
-     * a custom body's sheet state at each seam, written only when it changes, for at most 32
-     * components and 96 lines. Fields are read, never written; no native function is called.
+     * the sheet state of every component that is not a known stock body (a custom body, or one whose
+     * model identity is not readable yet, with the reason) at each seam, written only when it
+     * changes, for at most 64 components and 256 lines. Fields are read, never written; no native
+     * function is called.
      */
     struct SheetTrace { void* component; uint32_t signature; };
-    SheetTrace g_traces[32] = {};
+    SheetTrace g_traces[64] = {};
     uint32_t g_traceLines = 0;
 
     void TraceSheet(const char* where, void* component, int result)
     {
-        if (!component || g_traceLines >= 96)
+        if (!component || g_traceLines >= 256)
             return;
         const char* stem = ModelStem(component);
-        if (!sa::IsCustomBody(stem))
+        if (stem && !sa::IsCustomBody(stem))
             return;
         auto* base = static_cast<uint8_t*>(component);
+        void* shared = nullptr;
+        if (void* owner = *reinterpret_cast<void**>(base + m2::kOffCharComponentInstance))
+            shared = *reinterpret_cast<void**>(static_cast<uint8_t*>(owner) + m2::kOffInstShared);
         void* request = *reinterpret_cast<void**>(base + m2::kOffCharComponentComposeRequest);
         void* instance = *reinterpret_cast<void**>(base + m2::kOffCharComponentInstance);
         const uint32_t rebuild = Field(component, m2::kOffCharComponentRebuild);
@@ -103,7 +108,7 @@ namespace
         uint32_t signature = 2166136261u;
         for (const char* c = where; *c; ++c)
             signature = (signature ^ uint8_t(*c)) * 16777619u;
-        for (const uint32_t value : { uint32_t(result + 1),
+        for (const uint32_t value : { uint32_t(result + 1), uint32_t(stem != nullptr), uint32_t(shared != nullptr),
                                       rebuild & 1u, uint32_t(dirty != 0), format, uint32_t(sheet != 0),
                                       uint32_t(request != nullptr), requestFlags & 7u, initFlags & 3u })
             signature = (signature ^ value) * 16777619u;
@@ -115,10 +120,12 @@ namespace
         slot->component = component;
         slot->signature = signature;
         ++g_traceLines;
-        WLOG_INFO("skin-alpha: sheet-trace record=%u where=%s result=%d component=%p stem=%s rebuild=0x%X "
-                  "dirty=0x%X format=%u sheet=%u request=%p requestFlags=0x%X requestFormat=%u "
-                  "instance=%p initFlags=0x%X", g_traceLines, where, result, component, stem, rebuild,
-                  dirty, format, sheet, request, requestFlags, requestFormat, instance, initFlags);
+        WLOG_INFO("skin-alpha: sheet-trace record=%u where=%s result=%d component=%p stem=%s race=%u sex=%u "
+                  "shared=%p rebuild=0x%X dirty=0x%X format=%u sheet=%u request=%p requestFlags=0x%X "
+                  "requestFormat=%u instance=%p initFlags=0x%X", g_traceLines, where, result, component,
+                  stem ? stem : (!instance ? "(no instance)" : !shared ? "(no shared model)" : "(no path)"),
+                  Field(component, m2::kOffCharComponentRace), Field(component, m2::kOffCharComponentSex),
+                  shared, rebuild, dirty, format, sheet, request, requestFlags, requestFormat, instance, initFlags);
         wxl::log::Flush();
     }
 
