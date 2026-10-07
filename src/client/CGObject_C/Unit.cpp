@@ -23,6 +23,7 @@
 #include "offsets/game/Unit.hpp"
 
 #include <cstdint>
+#include <initializer_list>
 
 namespace
 {
