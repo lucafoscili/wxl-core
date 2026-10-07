@@ -180,39 +180,34 @@ namespace
      */
     unit::UnitPrepFn g_origUnitPrep = nullptr;
     unit::CharSetupFn g_origCharSetup = nullptr;
-    // Only units still without a character component hold a slot; one that gets its component, or
-    // that stops being prepped (despawned), gives way. Each event kind keeps its own last state.
+    // Every player unit gets a slot on first sight (32, oldest-unseen evicted), so the trace shows
+    // healthy players beside stalled ones. A component counts as set up once CharInit attached it
+    // to an instance (+0x38): an allocated component with no instance is stalled too.
     struct SetupWatch { void* unit; uint64_t guid; uint32_t kicks; uint32_t seen; uint32_t signature[3]; };
-    SetupWatch g_watches[16] = {};
+    SetupWatch g_watches[32] = {};
     uint32_t g_watchLines = 0, g_prepClock = 0;
-    bool g_watchFull = false;
     constexpr uint32_t kSetupKicks = 600;
+    constexpr size_t kOffComponentInstance = 0x38;
+
+    bool PlayerUnit(void* self)
+    {
+        return self && (Read<uint32_t>(Read<void*>(self, unit::kOffObjectFields), 8) & unit::kTypeMaskPlayer);
+    }
 
     bool Velora(void* self)
     {
         const void* fields = Read<void*>(self, unit::kOffUnitDescriptor);
-        // Velora displays clone their race's display row, which carries no extended row: the
-        // display id alone selects these units.
-        return self && fields && Read<uint32_t>(fields, unit::kOffFieldDisplayId) >= 100000u;
+        return fields && Read<uint32_t>(fields, unit::kOffFieldDisplayId) >= 100000u;
     }
 
-    SetupWatch* Watch(void* self, bool claim)
+    SetupWatch* Watch(void* self)
     {
         const uint64_t id = Read<uint64_t>(Read<void*>(self, unit::kOffObjectFields), 0);
         for (auto& watch : g_watches)
             if (watch.unit == self && watch.guid == id) return &watch;
-        if (!claim)
-            return nullptr;
         SetupWatch* stalest = &g_watches[0];
         for (auto& watch : g_watches)
             if (!watch.unit || g_prepClock - watch.seen > g_prepClock - stalest->seen) stalest = &watch;
-        if (stalest->unit && g_prepClock - stalest->seen < 600 && !g_watchFull)
-        {
-            g_watchFull = true;  // sixteen units all stalled and still prepped: say so once
-            WLOG_WARN("unit: setup-trace has no free slot; further stalled units are not watched");
-        }
-        if (stalest->unit && g_prepClock - stalest->seen < 600)
-            return nullptr;
         *stalest = { self, id, 0, g_prepClock, { 0, 0, 0 } };
         return stalest;
     }
@@ -225,44 +220,43 @@ namespace
         const uint32_t flags = Read<uint32_t>(self, unit::kOffUnitCharFlags);
         const uint32_t initFlags = Read<uint32_t>(instance, 0x10), sharedFlags = Read<uint32_t>(shared, 8);
         void* component = Read<void*>(self, unit::kOffUnitCharComponent);
+        void* attached = Read<void*>(component, kOffComponentInstance);
         uint32_t signature = 2166136261u;
         for (const uint32_t value : { uint32_t(result + 2), flags & (unit::kCharSetupPending | 0x20000u),
                                       uint32_t(instance != nullptr), initFlags & 1u, sharedFlags & 7u,
-                                      uint32_t(component != nullptr) })
+                                      uint32_t(component != nullptr), uint32_t(attached != nullptr),
+                                      Read<uint32_t>(fields, unit::kOffFieldDisplayId) })
             signature = (signature ^ value) * 16777619u;
-        if (signature == watch.signature[kind] || g_watchLines >= 128)
+        if (signature == watch.signature[kind] || g_watchLines >= 160)
             return;
         watch.signature[kind] = signature;
-        if (++g_watchLines == 128)
-            WLOG_WARN("unit: setup-trace reached its 128-line budget; later transitions are not logged");
+        if (++g_watchLines == 160)
+            WLOG_WARN("unit: setup-trace reached its 160-line budget; later transitions are not logged");
         WLOG_INFO("unit: setup-trace record=%u where=%s result=%d unit=%p display=%u flags=0x%X flags2=0x%X "
-                  "instance=%p initFlags=0x%X shared=%p sharedFlags=0x%X component=%p kicks=%u",
+                  "instance=%p initFlags=0x%X shared=%p sharedFlags=0x%X component=%p attached=%p kicks=%u",
                   g_watchLines, where, result, self, Read<uint32_t>(fields, unit::kOffFieldDisplayId), flags,
                   Read<uint32_t>(fields, unit::kOffFieldFlags2), instance, initFlags, shared, sharedFlags,
-                  component, watch.kicks);
+                  component, attached, watch.kicks);
         wxl::log::Flush();
     }
 
     void __fastcall hkUnitPrep(void* self, void* edx, void* a, void* b, void* c)
     {
         ++g_prepClock;
-        if (Velora(self))
+        if (PlayerUnit(self))
         {
-            const bool stalled = !Read<void*>(self, unit::kOffUnitCharComponent);
-            if (SetupWatch* watch = Watch(self, stalled))
+            SetupWatch* watch = Watch(self);
+            watch->seen = g_prepClock;
+            void* component = Read<void*>(self, unit::kOffUnitCharComponent);
+            const bool stalled = !component || !Read<void*>(component, kOffComponentInstance);
+            TraceSetup(0, stalled ? "prep-stalled" : "prep-ready", self, *watch, 0);
+            auto& flags = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(self) + unit::kOffUnitCharFlags);
+            if (stalled && Velora(self) && Read<void*>(self, unit::kOffUnitInstance)
+                && !(flags & (unit::kCharSetupPending | 0x20000u)) && watch->kicks < kSetupKicks)
             {
-                watch->seen = g_prepClock;
-                TraceSetup(0, stalled ? "prep" : "ready", self, *watch, 0);
-                auto& flags = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(self) + unit::kOffUnitCharFlags);
-                if (!stalled)
-                    watch->unit = nullptr;  // set up: give the slot way
-                else if (Read<void*>(self, unit::kOffUnitInstance)
-                         && !(flags & (unit::kCharSetupPending | 0x20000u)) && watch->kicks < kSetupKicks)
-                {
-                    TraceSetup(1, "kick", self, *watch, -1);
-                    ++watch->kicks;
-                    flags |= unit::kCharSetupPending;
-                }
+                TraceSetup(1, "kick", self, *watch, -1);
+                ++watch->kicks;
+                flags |= unit::kCharSetupPending;
             }
         }
         g_origUnitPrep(self, edx, a, b, c);
@@ -271,9 +265,8 @@ namespace
     int __fastcall hkCharSetup(void* self, void* edx)
     {
         const int result = g_origCharSetup(self, edx);
-        if (Velora(self))
-            if (SetupWatch* watch = Watch(self, false))
-                TraceSetup(2, "setup", self, *watch, result);
+        if (PlayerUnit(self))
+            TraceSetup(2, "setup", self, *Watch(self), result);
         return result;
     }
 
