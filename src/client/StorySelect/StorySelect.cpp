@@ -962,7 +962,9 @@ namespace
             for (size_t i=0; i<off::kRealmNameSite.size; ++i)
                 value=(value^Read<uint8_t>(off::kRealmNameSite.address+i))*0x100000001b3ULL;
             if (value!=off::kRealmNameSite.hash) return false;
-            if (!InstallModelRedirect()) return false;
+            // A failed or half-rolled-back install must never register roots: with no map, the factory
+            // (if its redirect survived) creates stock only and the guards see an empty registry.
+            if (!InstallModelRedirect()) { g_modelMap.clear(); return false; }
         }
         if (!probe && !capacity) return true;
         if (!wxl::hook::Install("StorySelectValidate", script::kValidateCallbackSeam, &Validate, &g_validate) ||
