@@ -46,7 +46,6 @@ namespace
     bool InitializingRow() { return g_rowScope && g_rowScope->initializing; }
     __declspec(noinline) int __cdecl ContextIndex()
     { return g_rowScope ? g_rowScope->index : Read<int>(off::kSelected); }
-    wxl::story::models::InstanceRegistry g_creatureRoots;
     std::vector<wxl::story::models::Entry> g_modelMap;
     bool LoadModelMap()
     {
@@ -95,81 +94,13 @@ namespace
         using Factory=void*(__thiscall*)(void*,const char*,uint32_t);
         return wxl::story::models::Create(entry,stock,flags,[scene](const char* path,uint32_t options) {
             return wxl::game::Native<Factory>(off::kInstanceCreate)(scene,path,options);
-        }, &g_creatureRoots);
-    }
-    // A callee-entry guard covers every synchronous/deferred geoset caller, including cached
-    // rows. Textures stay native: the row's sheet is painted as in the world, where WXL's custom
-    // body alpha keeps the crossover's own skin and cuts the skin under gear (trial 12).
-    // The empty-registry path has no helper call, scan or FP/SIMD work. Integer-only assembly
-    // preserves flags/registers and cannot disturb live x87 values.
-    uintptr_t g_geosetResume=off::kRootGeoset+6;
-#define ROOT_GUARD() \
-        __asm { pushfd } \
-        __asm { cmp g_creatureRoots.count, 0 } \
-        __asm { je native } \
-        __asm { push eax } __asm { push edx } \
-        __asm { mov eax, g_creatureRoots.count } \
-        __asm { scan: dec eax } \
-        __asm { cmp ecx, g_creatureRoots.instances[eax*4] } \
-        __asm { je suppress } \
-        __asm { test eax, eax } __asm { jne scan } \
-        __asm { pop edx } __asm { pop eax } \
-        __asm { native: popfd }
-    __declspec(naked) void RootGeoset()
-    {
-        ROOT_GUARD()
-        __asm { push ebp } __asm { mov ebp, esp } __asm { sub esp, 8 }
-        __asm { jmp dword ptr [g_geosetResume] }
-        __asm { suppress: pop edx } __asm { pop eax } __asm { popfd }
-        __asm { ret 12 } // thiscall(first, last, visible)
-    }
-#undef ROOT_GUARD
-    void __cdecl RetireSelectComponent(void* component)
-    {
-        if (component) g_creatureRoots.Retire(Read<uintptr_t>(reinterpret_cast<uintptr_t>(component)+off::kActor));
-    }
-    void __cdecl FreeSelectComponent(void* component)
-    {
-        RetireSelectComponent(component); // before native release and possible address reuse
-        wxl::game::Native<void(__cdecl*)(void*)>(off::kComponentFree)(component);
-    }
-    __declspec(naked) void WorldSelectComponent()
-    {
-        __asm { pushfd } __asm { pushad }
-        __asm { push edx } __asm { call RetireSelectComponent } __asm { add esp, 4 }
-        __asm { popad } __asm { popfd }
-        __asm { mov dword ptr ds:[0B6B878h], edx } // displaced native ownership store
-        __asm { ret } // CALL adapter replaces the six-byte MOV; padding is NOP
+        });
     }
     bool InstallModelRedirect()
     {
-        // Validate the WHOLE policy before the first write, including the factory.
-        // Boot phase, using the same audited patch owner as the resident/camera seams.
-        const uintptr_t targets[]={reinterpret_cast<uintptr_t>(&CreateSelectModel),
-            reinterpret_cast<uintptr_t>(&RootGeoset),
-            reinterpret_cast<uintptr_t>(&FreeSelectComponent), reinterpret_cast<uintptr_t>(&FreeSelectComponent),
-            reinterpret_cast<uintptr_t>(&WorldSelectComponent)};
-        static_assert(sizeof(targets)/sizeof(targets[0])==sizeof(off::kCrossoverSites)/sizeof(off::kCrossoverSites[0]));
-        for (const auto& site : off::kCrossoverSites)
-            if (std::memcmp(reinterpret_cast<void*>(site.address),site.original,site.size))
-            { WLOG_WARN("select-models: incompatible %08x; stock only",unsigned(site.address)); return false; }
-        size_t applied=0;
-        for (; applied<sizeof(targets)/sizeof(targets[0]); ++applied)
-        {
-            const auto& site=off::kCrossoverSites[applied];
-            uint8_t bytes[6]={site.jump ? uint8_t(0xE9) : uint8_t(0xE8),0,0,0,0,0x90};
-            const uint32_t displacement=uint32_t(targets[applied]-site.address-5);
-            std::memcpy(bytes+1,&displacement,4);
-            if (!wxl::mem::Patch(reinterpret_cast<void*>(site.address),bytes,site.size)) break;
-        }
-        if (applied==sizeof(targets)/sizeof(targets[0])) return true;
-        while (applied)
-        {
-            const auto& site=off::kCrossoverSites[--applied];
-            if (!wxl::mem::Patch(reinterpret_cast<void*>(site.address),site.original,site.size))
-                WLOG_ERROR("select-models: rollback failed at %08x",unsigned(site.address));
-        }
-        return false;
+        const uint32_t displacement=uint32_t(reinterpret_cast<uintptr_t>(&CreateSelectModel)-off::kInstanceCreateCall-5);
+        uint8_t bytes[5]={0xE8}; std::memcpy(bytes+1,&displacement,4);
+        return wxl::mem::Patch(reinterpret_cast<void*>(off::kInstanceCreateCall),bytes,sizeof(bytes));
     }
     __declspec(noinline) float* __cdecl FacingTarget()
     { return InitializingRow() ? &g_rowScope->facingSink : reinterpret_cast<float*>(0xB6B204); }
@@ -955,8 +886,7 @@ namespace
             for (size_t i=0; i<off::kRealmNameSite.size; ++i)
                 value=(value^Read<uint8_t>(off::kRealmNameSite.address+i))*0x100000001b3ULL;
             if (value!=off::kRealmNameSite.hash) return false;
-            // A failed or half-rolled-back install must never register roots: with no map, the factory
-            // (if its redirect survived) creates stock only and the guards see an empty registry.
+            // A failed install never leaves a map behind for a factory call that might survive.
             if (!InstallModelRedirect()) { g_modelMap.clear(); return false; }
         }
         if (!probe && !capacity) return true;

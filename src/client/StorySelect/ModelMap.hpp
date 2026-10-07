@@ -20,6 +20,8 @@ namespace wxl::story::models
     { return text[0] && std::memchr(text,0,capacity); }
     inline bool ModelPath(const char* text)
     {
+        // Crossovers are creature models (Creature\Tifa\Tifa.m2): the row's native CharInit dresses,
+        // paints and shapes them as the world's setup does (trial 13).
         if (!Text(text,260) || (std::strncmp(text,"Character\\",10) &&
             std::strncmp(text,"Creature\\",9))) return false;
         const size_t size = std::strlen(text);
@@ -71,47 +73,12 @@ namespace wxl::story::models
                 !std::memcmp(row.appearance.data(),appearance,8)) return &row;
         return nullptr;
     }
-    inline bool CreaturePath(const char* path)
-    { return path && !std::strncmp(path,"Creature\\",9); }
-    // Glue owns these exact factory results until free or world transfer. Row switches
-    // deliberately do not clear them: deferred prep and cached selection use the same root.
-    // Native glue creation/prep/retirement run on the client thread, as does CharInit.
-    struct InstanceRegistry
-    {
-        uint32_t count = 0;
-        uintptr_t instances[kMaximum]{};
-        bool Contains(uintptr_t instance) const
-        {
-            for (uint32_t i=0; i<count; ++i) if (instances[i]==instance) return true;
-            return false;
-        }
-        bool Add(uintptr_t instance)
-        {
-            if (!instance) return false;
-            if (Contains(instance)) return true;
-            if (count==kMaximum) return false;
-            instances[count++]=instance;
-            return true;
-        }
-        void Retire(uintptr_t instance)
-        {
-            for (uint32_t i=0; i<count; ++i)
-                if (instances[i]==instance) { instances[i]=instances[--count]; return; }
-        }
-    };
     // Keep scene, flags and stock failure semantics with the native instance factory.
     template<class Factory>
-    auto Create(const Entry* entry, const char* stock, uint32_t flags, Factory factory,
-                InstanceRegistry* roots=nullptr)
+    auto Create(const Entry* entry, const char* stock, uint32_t flags, Factory factory)
     {
-        const bool creature=entry && CreaturePath(entry->model);
-        // Capacity failure stays stock before creating an untracked creature instance.
-        if (entry && (!creature || !roots || roots->count<kMaximum))
-            if (auto instance=factory(entry->model,flags))
-            {
-                if (creature && roots) roots->Add(reinterpret_cast<uintptr_t>(instance));
-                return instance;
-            }
+        if (entry)
+            if (auto instance=factory(entry->model,flags)) return instance;
         return factory(stock,flags);
     }
 }
