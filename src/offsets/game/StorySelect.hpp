@@ -13,12 +13,11 @@ namespace wxl::offsets::game::story
     constexpr uintptr_t kSelectCharacter = 0x004E4580;
     constexpr uintptr_t kInitialize = 0x004E3CD0, kLighting = 0x004E3A20;
     constexpr uintptr_t kInstanceCreateCall = 0x004E3E4A, kInstanceCreate = 0x0081F8F0;
-    constexpr uintptr_t kRootTexture=0x00825260, kRootGeoset=0x0082C7C0;
+    constexpr uintptr_t kRootGeoset=0x0082C7C0;
     constexpr uintptr_t kComponentFree=0x004F16C0;
     struct CrossoverSite { uintptr_t address; uint8_t size; bool jump; uint8_t original[6]; };
     inline constexpr CrossoverSite kCrossoverSites[] = {
         {kInstanceCreateCall,5,false,{0xE8,0xA1,0xBA,0x33,0x00}},
-        {kRootTexture,5,true,{0x55,0x8B,0xEC,0x51,0x53}},
         {kRootGeoset,6,true,{0x55,0x8B,0xEC,0x83,0xEC,0x08}},
         {0x004E38B0,5,false,{0xE8,0x0B,0xDE,0x00,0x00}},
         {0x004E30B3,5,false,{0xE8,0x08,0xE6,0x00,0x00}},

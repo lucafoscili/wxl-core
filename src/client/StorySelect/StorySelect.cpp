@@ -97,10 +97,12 @@ namespace
             return wxl::game::Native<Factory>(off::kInstanceCreate)(scene,path,options);
         }, &g_creatureRoots);
     }
-    // Callee-entry guards cover every synchronous/deferred setter caller, including
-    // cached rows. The empty-registry path has no helper call, scan or FP/SIMD work.
-    // Integer-only assembly preserves flags/registers and cannot disturb live x87 values.
-    uintptr_t g_textureResume=off::kRootTexture+5, g_geosetResume=off::kRootGeoset+6;
+    // A callee-entry guard covers every synchronous/deferred geoset caller, including cached
+    // rows. Textures stay native: the row's sheet is painted as in the world, where WXL's custom
+    // body alpha keeps the crossover's own skin and cuts the skin under gear (trial 12).
+    // The empty-registry path has no helper call, scan or FP/SIMD work. Integer-only assembly
+    // preserves flags/registers and cannot disturb live x87 values.
+    uintptr_t g_geosetResume=off::kRootGeoset+6;
 #define ROOT_GUARD() \
         __asm { pushfd } \
         __asm { cmp g_creatureRoots.count, 0 } \
@@ -113,15 +115,6 @@ namespace
         __asm { test eax, eax } __asm { jne scan } \
         __asm { pop edx } __asm { pop eax } \
         __asm { native: popfd }
-    __declspec(naked) void RootTexture()
-    {
-        ROOT_GUARD()
-        __asm { push ebp } __asm { mov ebp, esp } // displaced stock prologue
-        __asm { push ecx } __asm { push ebx }
-        __asm { jmp dword ptr [g_textureResume] }
-        __asm { suppress: pop edx } __asm { pop eax } __asm { popfd }
-        __asm { ret 8 } // thiscall(type, texture); native return value is unused
-    }
     __declspec(naked) void RootGeoset()
     {
         ROOT_GUARD()
@@ -153,7 +146,7 @@ namespace
         // Validate the WHOLE policy before the first write, including the factory.
         // Boot phase, using the same audited patch owner as the resident/camera seams.
         const uintptr_t targets[]={reinterpret_cast<uintptr_t>(&CreateSelectModel),
-            reinterpret_cast<uintptr_t>(&RootTexture), reinterpret_cast<uintptr_t>(&RootGeoset),
+            reinterpret_cast<uintptr_t>(&RootGeoset),
             reinterpret_cast<uintptr_t>(&FreeSelectComponent), reinterpret_cast<uintptr_t>(&FreeSelectComponent),
             reinterpret_cast<uintptr_t>(&WorldSelectComponent)};
         static_assert(sizeof(targets)/sizeof(targets[0])==sizeof(off::kCrossoverSites)/sizeof(off::kCrossoverSites[0]));
