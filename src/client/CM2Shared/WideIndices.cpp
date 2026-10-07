@@ -213,6 +213,9 @@ namespace
         PickingCall* pickingCall = nullptr; // borrowed stack frame, scoped to kHitTestGeometry
         uint64_t pickingGeneration = 0;     // invalidates in-flight calls across a rebuild
         uint32_t pickingLogged = 0;         // low / crossing / above, legacy-wide, reject-reason bits
+        void* refilledSharedIb = nullptr;   // native built/valid does not certify our repair
+        void* refilledSharedVb = nullptr;
+        void* rejectedSharedIb = nullptr;   // window admission refused by the skin's own data
     };
     constexpr size_t kMaxWideSkins = 64;
     // Keep the added hook-chain slots and log budget in the existing registry too. No second
@@ -255,14 +258,35 @@ namespace
         return &n;
     }
 
-    void ClearSharedConversion(void* model)
+    void ClearSharedConversion(void* model, bool clearVertices = false)
     {
         for (size_t i = 0; i < g_wideSkinCount; ++i)
             if (g_wideSkins[i].model == model)
             {
                 g_wideSkins[i].convertedSharedIb = nullptr;
+                g_wideSkins[i].refilledSharedIb = nullptr;
+                g_wideSkins[i].rejectedSharedIb = nullptr;
+                if (clearVertices) g_wideSkins[i].refilledSharedVb = nullptr;
                 ++g_wideSkins[i].pickingGeneration;
             }
+    }
+
+    // A vertex rebuild retires only the vertex repair: converted indices stay true to their own
+    // buffer, and a converted draw also requires the current vertex repair (hkDeviceDraw).
+    void ClearVertexRepair(void* model)
+    {
+        for (size_t i = 0; i < g_wideSkinCount; ++i)
+            if (g_wideSkins[i].model == model) g_wideSkins[i].refilledSharedVb = nullptr;
+    }
+
+    // One note's index binding, leaving every other note of its model alone. The vertex repair stays:
+    // a new buffer at the same address is a rebuild, which its setter retires.
+    void RetireBinding(WideSkinNote& n)
+    {
+        n.convertedSharedIb = nullptr;
+        n.refilledSharedIb = nullptr;
+        n.rejectedSharedIb = nullptr;
+        ++n.pickingGeneration;
     }
 
     WideSkinNote* ConvertedBinding(void* buffer)
@@ -273,8 +297,9 @@ namespace
         return nullptr;
     }
 
-    // This is a fill-time check, not a per-draw scan of all triangle payloads.
-    bool CanWindowSharedIndices(void* model, const M2SkinProfile* skin)
+    // This is a fill-time check, not a per-draw scan of all triangle payloads. dataRejected reports a
+    // refusal by the skin's own indices or vertex lookup, which no later bind of the buffer changes.
+    bool CanWindowSharedIndices(void* model, const M2SkinProfile* skin, bool* dataRejected = nullptr)
     {
         if (!model || !skin || skin->vertexCount <= 0x10000u || !skin->submeshes
             || !skin->indices || !skin->vertexLookup || !skin->bones || !UsesGlobalIndices(model)
@@ -298,14 +323,28 @@ namespace
                 || copy.indexCount != s.indexCount || copy.vertexCount != s.vertexCount
                 || copy.vertexStart != s.vertexStart || copy.indexStart != s.indexStart || copy.level != s.level)
                 return false;
-            for (uint32_t k = 0; k < s.indexCount; ++k)
-                if (window::LocalIndex(skin->indices[start + k], s.vertexStart) >= s.vertexCount) return false;
-            for (uint32_t k = 0; k < s.vertexCount; ++k)
-                if (skin->vertexLookup[first + k] != uint16_t(first + k)) return false;
             first += s.vertexCount;
             written += s.indexCount;
         }
-        return first == skin->vertexCount && written == skin->indexCount;
+        if (!(first == skin->vertexCount && written == skin->indexCount)) return false;
+        first = 0;
+        for (uint32_t i = 0; i < skin->submeshCount; ++i)
+        {
+            const M2SkinSection& s = skin->submeshes[i];
+            const uint32_t start = TriangleStart(s, *skin);
+            bool fits = true;
+            for (uint32_t k = 0; fits && k < s.indexCount; ++k)
+                if (window::LocalIndex(skin->indices[start + k], s.vertexStart) >= s.vertexCount) fits = false;
+            for (uint32_t k = 0; fits && k < s.vertexCount; ++k)
+                if (skin->vertexLookup[first + k] != uint16_t(first + k)) fits = false;
+            if (!fits)
+            {
+                if (dataRejected) *dataRejected = true;
+                return false;
+            }
+            first += s.vertexCount;
+        }
+        return true;
     }
 
     uint32_t DiagnosticFileFlags(void* model)
@@ -441,7 +480,7 @@ namespace
      *        instance copy, at the offsets the engine wrote back into the submesh copies.
      */
     void RefillSharedIndices(void* model, const M2SkinProfile& skin, bool globalIndices,
-                             WideSkinNote* windowNote = nullptr)
+                             WideSkinNote* windowNote = nullptr, WideSkinNote* refillNote = nullptr)
     {
         void* device = wxl::game::gx::RawGraphicsDevice();
         void* buffer = *At<void*>(model, off::kOffSharedIndexBuf);
@@ -487,8 +526,17 @@ namespace
             }
         }
         CommitIndexBuffer(device, buffer);
+        if (refillNote)
+        {
+            refillNote->model = model;
+            refillNote->refilledSharedIb = buffer;
+        }
         if (windowNote)
         {
+            // A freed model's note can still name this address; only one buffer lives there.
+            for (size_t i = 0; i < g_wideSkinCount; ++i)
+                if (&g_wideSkins[i] != windowNote && g_wideSkins[i].convertedSharedIb == buffer)
+                    RetireBinding(g_wideSkins[i]);
             windowNote->model = model;
             windowNote->convertedSharedIb = buffer;
             const auto* header = *At<M2Header*>(model, off::kOffModelHeader);
@@ -518,12 +566,14 @@ namespace
      * visit each submesh anyway to know the bone count its co-instance shift is scaled by, and a
      * partial pass would need the submesh a slot belongs to worked out a second, different way.
      */
-    void RefillWideVertices(void* model, const M2SkinProfile& skin)
+    void RefillWideVertices(void* model, const M2SkinProfile& skin, WideSkinNote* refillNote = nullptr)
     {
         void* device = wxl::game::gx::RawGraphicsDevice();
         void* buffer = *At<void*>(model, off::kOffSharedVertexBuf);
         auto* header = *At<M2Header*>(model, off::kOffModelHeader);
-        if (!device || !buffer || !header || !skin.bones) return;
+        if (!device || !buffer || !header || !skin.bones
+            || !*reinterpret_cast<const uint32_t*>(off::kEnableShaders)
+            || *At<uint32_t>(buffer, gxoff::kGxBufStreamStride) != off::kModelVertexStride) return;
 
         // Resolved in place by the load, so what the header holds is already a pointer.
         const auto* source = reinterpret_cast<const uint8_t*>(header->vertices.offset);
@@ -564,6 +614,11 @@ namespace
         // The original SharedSetVertices already selected this vertex stream. Do not
         // pass its buffer to PrimIndexPtr: that would replace the device's index source.
         UnlockBuffer(device, buffer);
+        if (refillNote)
+        {
+            refillNote->model = model;
+            refillNote->refilledSharedVb = buffer;
+        }
         if (logRefill)
         {
             ++g_vertexRefillLogs;
@@ -593,17 +648,46 @@ namespace
 
     uint32_t __fastcall hkSharedSetIndices(void* model, void* edx)
     {
-        auto* skin = model ? *At<M2SkinProfile*>(model, off::kOffModelSkin) : nullptr;
-        const bool rebuilding = model && !BufferHolds(*At<void*>(model, off::kOffSharedIndexBuf));
+        void* previousBuffer = model ? *At<void*>(model, off::kOffSharedIndexBuf) : nullptr;
+        const auto* previousSkin = model ? *At<M2SkinProfile*>(model, off::kOffModelSkin) : nullptr;
+        const bool rebuilding = model && !BufferHolds(previousBuffer);
         if (rebuilding) ClearSharedConversion(model);
 
         // The original owns creating the pool/buffer pair and sizing it, so it always runs first.
         const uint32_t result = g_origSharedSetIndices(model, edx);
-        if (!result || !rebuilding) return result;
-        const bool windows = CanWindowSharedIndices(model, skin);
-        if (!UsesWideStarts(skin) && !windows) return result;
+        auto* skin = model ? *At<M2SkinProfile*>(model, off::kOffModelSkin) : nullptr;
+        void* buffer = model ? *At<void*>(model, off::kOffSharedIndexBuf) : nullptr;
+        if (model && (buffer != previousBuffer || skin != previousSkin))
+            ClearSharedConversion(model, skin != previousSkin);
+        if (!result || (!UsesWideStarts(skin) && !NeedsWideVertices(skin))) return result;
         WideSkinNote* note = NoteWideSkin(skin);
-        RefillSharedIndices(model, *skin, UsesGlobalIndices(model), windows ? note : nullptr);
+        // A native-valid buffer can still contain an uncorrected fill. Retry until our commit,
+        // then leave ordinary binds alone; dirty flags also catch rebuilds at the same address.
+        if (!buffer) return result;
+        if (!note)
+        {
+            // A full registry has nowhere to mark completion: keep the one-shot repair on rebuild.
+            if (rebuilding && UsesWideStarts(skin)) RefillSharedIndices(model, *skin, UsesGlobalIndices(model));
+            return result;
+        }
+        const bool refilled = !rebuilding && note->model == model && note->refilledSharedIb == buffer;
+        const bool pendingWindows = skin->vertexCount > 0x10000u && UsesGlobalIndices(model)
+                                    && note->convertedSharedIb != buffer;
+        if (refilled && !pendingWindows) return result;
+        bool dataRejected = false;
+        const bool windows = note->rejectedSharedIb != buffer
+                             && CanWindowSharedIndices(model, skin, &dataRejected);
+        if (dataRejected)
+        {
+            note->model = model;
+            note->rejectedSharedIb = buffer;
+        }
+        if (!UsesWideStarts(skin) && !windows) return result;
+        // A completed triangle fold need not run again while window admission is deferred.
+        // Still retry admission so a later eligible bind can upgrade it to a conversion.
+        if (refilled && !windows) return result;
+        if (!rebuilding) ClearSharedConversion(model);
+        RefillSharedIndices(model, *skin, UsesGlobalIndices(model), windows ? note : nullptr, note);
         return result;
     }
 
@@ -666,6 +750,30 @@ namespace
     {
         WideSkinNote* converted = indexed
             ? ConvertedBinding(*At<void*>(device, gxoff::kGxDeviceIndexBuffer)) : nullptr;
+        const auto stale = [device](const WideSkinNote& n)
+        {
+            if (!g_drawModel || !g_drawSkin)
+            {
+                // Outside every batch context (projected decals bind the model's own buffers too)
+                // only a stream in no model's vertex layout proves the address was reused, as the
+                // stride-36 draw did; anything else keeps the unsupported-draw skip below.
+                void* stream = *At<void*>(device, gxoff::kGxDeviceVertexStream);
+                return stream && *At<uint32_t>(stream, gxoff::kGxBufStreamStride) != off::kModelVertexStride;
+            }
+            return n.model != g_drawModel || n.skin != g_drawSkin
+                   || *At<M2SkinProfile*>(g_drawModel, off::kOffModelSkin) != g_drawSkin
+                   || n.convertedSharedIb != *At<void*>(g_drawModel, off::kOffSharedIndexBuf)
+                   || !BufferHolds(*At<void*>(g_drawModel, off::kOffSharedIndexBuf))
+                   || n.indices != g_drawSkin->indices || n.indexCount != g_drawSkin->indexCount
+                   || n.vertexCount != g_drawSkin->vertexCount;
+        };
+        // An address can outlive its buffer/model, and two notes can name it: retire each stale match
+        // by itself, never reading its stored model, and look again; unrelated draws stay native.
+        while (converted && stale(*converted))
+        {
+            RetireBinding(*converted);
+            converted = ConvertedBinding(*At<void*>(device, gxoff::kGxDeviceIndexBuffer));
+        }
         const bool logDraw = indexed && batch && g_drawSection && NeedsWideVertices(g_drawSkin)
                              && g_drawLogs < kDrawLogLimit;
         void* diagnosticStream = logDraw ? *At<void*>(device, gxoff::kGxDeviceVertexStream) : nullptr;
@@ -711,6 +819,7 @@ namespace
                 && *At<uint32_t>(g_drawModel, off::kOffSharedInstanceCopies) == 1
                 && UsesGlobalIndices(g_drawModel) && *reinterpret_cast<const uint32_t*>(off::kEnableShaders)
                 && stream && stream == *At<void*>(g_drawModel, off::kOffSharedVertexBuf)
+                && stream == converted->refilledSharedVb
                 && stride == off::kModelVertexStride && !*At<uint32_t>(device, gxoff::kGxDeviceBaseVertexMode)
                 && SubmeshIndexOf(*g_drawSection, *g_drawSkin, section)
                 && WideVertexStart(*g_drawSkin, section, wideStart);
@@ -1377,13 +1486,27 @@ namespace
 
     uint32_t __fastcall hkSharedSetVertices(void* model, void* edx, int texCoordSet)
     {
-        auto* skin = model ? *At<M2SkinProfile*>(model, off::kOffModelSkin) : nullptr;
-        const bool rebuilding = model && !BufferHolds(*At<void*>(model, off::kOffSharedVertexBuf));
+        void* previousBuffer = model ? *At<void*>(model, off::kOffSharedVertexBuf) : nullptr;
+        const auto* previousSkin = model ? *At<M2SkinProfile*>(model, off::kOffModelSkin) : nullptr;
+        const bool rebuilding = model && !BufferHolds(previousBuffer);
+        if (rebuilding) ClearVertexRepair(model);
 
         // The original owns creating and sizing the pool and buffer, so it always runs first.
         const uint32_t result = g_origSharedSetVertices(model, edx, texCoordSet);
-        if (!result || !rebuilding || !NeedsWideVertices(skin)) return result;
-        RefillWideVertices(model, *skin);
+        auto* skin = model ? *At<M2SkinProfile*>(model, off::kOffModelSkin) : nullptr;
+        void* buffer = model ? *At<void*>(model, off::kOffSharedVertexBuf) : nullptr;
+        if (model && skin != previousSkin) ClearSharedConversion(model, true);
+        else if (model && buffer != previousBuffer) ClearVertexRepair(model);
+        if (!result || !NeedsWideVertices(skin)) return result;
+        WideSkinNote* note = NoteWideSkin(skin);
+        if (!buffer) return result;
+        if (!note)
+        {
+            if (rebuilding) RefillWideVertices(model, *skin);
+            return result;
+        }
+        if (!rebuilding && note->model == model && note->refilledSharedVb == buffer) return result;
+        RefillWideVertices(model, *skin, note);
         return result;
     }
 
