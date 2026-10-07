@@ -88,4 +88,16 @@ namespace wxl::offsets::engine::camera
     /// The per-frame camera advance, above matrix construction - the place to inject camera shake,
     /// offsets or a scripted path. __cdecl, caller-cleaned.
     constexpr uintptr_t kUpdateCallback                    = 0x00607B00;
+
+    // Camera-follow update's finished distance alpha, before the later timed fade.
+    // ESI = camera, EBP = native frame, alpha byte = [EBP-0x0C]. Build 12340.
+    constexpr uintptr_t kDistanceFadeSubmit = 0x006079FD;
+    constexpr uintptr_t kDistanceFadeResume = 0x00607A06;
+    constexpr uintptr_t kDistanceFadeSubmitContext = 0x00B7436C;
+    constexpr size_t kFollowTargetGuid = 0x88;  // uint64_t, camera-follow object
+    constexpr size_t kFollowDistance = 0x128;   // float, not SimpleCamera above
+    constexpr uint8_t kDistanceFadeOriginal[] = {
+        0x8B, 0x45, 0xF4, 0x8B, 0x0D, 0x6C, 0x43, 0xB7, 0x00
+    }; // mov eax,[ebp-0x0C]; mov ecx,[0x00B7436C]
+    static_assert(kDistanceFadeResume - kDistanceFadeSubmit == sizeof kDistanceFadeOriginal);
 }
