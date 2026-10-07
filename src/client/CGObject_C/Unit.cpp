@@ -277,17 +277,29 @@ namespace
      * or not yet attached gets the native setup called once, up to kDriveTries times per unit.
      * Setup itself waits for a ready instance, so an unready model only costs a check.
      */
-    struct Drive { uint64_t guid; uint32_t tries; bool logged; };
-    Drive g_drives[16] = {};
-    uint32_t g_driveFrames = 0, g_driveLines = 0;
+    // A slot lives while its unit is still eligible in the latest pass; a unit that despawned, got its
+    // component through the engine or changed display is freed after the pass. A GUID that spends its
+    // budget is remembered until the world is left, so eviction never refills its budget.
+    struct Drive { uint64_t guid; uint32_t tries; uint32_t pass; bool logged; };
+    Drive g_drives[32] = {};
+    uint64_t g_spent[64] = {};
+    size_t g_spentCount = 0;
+    uint32_t g_driveFrames = 0, g_drivePass = 0, g_driveLines = 0;
     constexpr uint32_t kDriveTries = 240;
+
+    bool Spent(uint64_t guid)
+    {
+        for (size_t i = 0; i < g_spentCount; ++i)
+            if (g_spent[i] == guid) return true;
+        return false;
+    }
 
     int __cdecl DriveStep(uint32_t low, uint32_t high, void*)
     {
         const uint64_t guid = (uint64_t(high) << 32) | low;
         void* self = reinterpret_cast<unit::GetObjectFn>(unit::kGetObjectByGuid)(guid, unit::kTypeMaskPlayer,
                                                                                 "wxl-setup-drive", 0);
-        if (!self || !Velora(self) || !Read<void*>(self, unit::kOffUnitInstance))
+        if (!self || !Velora(self) || !Read<void*>(self, unit::kOffUnitInstance) || Spent(guid))
             return 1;
         void* component = Read<void*>(self, unit::kOffUnitCharComponent);
         const void* fields = Read<void*>(self, unit::kOffUnitDescriptor);
@@ -300,9 +312,10 @@ namespace
             if (drive.guid == guid) { slot = &drive; break; }
         if (!slot)
             for (auto& drive : g_drives)
-                if (!drive.guid || drive.tries > kDriveTries) { drive = { guid, 0, false }; slot = &drive; break; }
-        if (!slot || slot->tries > kDriveTries)
+                if (!drive.guid) { drive = { guid, 0, 0, false }; slot = &drive; break; }
+        if (!slot)
             return 1;
+        slot->pass = g_drivePass;
         ++slot->tries;
         void* instance = Read<void*>(self, unit::kOffUnitInstance);
         if (!slot->logged && g_driveLines < 48)
@@ -324,23 +337,35 @@ namespace
             WLOG_INFO("unit: setup-drive unit=%p %s after %u calls", self, result ? "set up" : "gave up", slot->tries);
             wxl::log::Flush();
         }
-        if (result)
-            slot->guid = 0;                 // done: free the slot
-        else if (spent)
-            slot->tries = kDriveTries + 1;  // spent: later passes skip it, and the slot may be reused
+        if (spent && g_spentCount < 64)
+            g_spent[g_spentCount++] = guid;
+        if (result || spent)
+            slot->guid = 0;
         return 1;
     }
 
     void OnUpdateDrive(void*, const void*)
     {
-        if (++g_driveFrames % 15)
+        // Only while a player is in the world: enumeration dereferences the object manager unchecked,
+        // and the active-player lookup returns zero whenever there is none.
+        if (++g_driveFrames % 15 || !reinterpret_cast<unit::ActivePlayerGuidFn>(unit::kActivePlayerGuid)())
             return;
+        ++g_drivePass;
         reinterpret_cast<unit::EnumObjectsFn>(unit::kEnumObjects)(&DriveStep, nullptr);
+        for (auto& drive : g_drives)
+            if (drive.guid && drive.pass != g_drivePass) drive.guid = 0;
+    }
+
+    void OnWorldLeaveDrive(void*, const void*)
+    {
+        for (auto& drive : g_drives) drive.guid = 0;
+        g_spentCount = 0;
     }
 
     bool InstallUnit()
     {
         wxl::events::Subscribe(wxl::events::Event::OnUpdate, &OnUpdateDrive, nullptr);
+        wxl::events::Subscribe(wxl::events::Event::OnWorldLeave, &OnWorldLeaveDrive, nullptr);
         wxl::hook::Install("UnitPrep", unit::kUnitPrep, &hkUnitPrep, &g_origUnitPrep);
         wxl::hook::Install("CharSetup", unit::kCharSetup, &hkCharSetup, &g_origCharSetup);
         wxl::hook::Install("CharSetupCreate", unit::kCharSetupCreate, &hkCharSetupCreate, &g_origCharSetupCreate);
