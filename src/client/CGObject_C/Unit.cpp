@@ -174,7 +174,7 @@ namespace
 
     /**
      * Trial trace and kick for the same stall: a unit shown through a Velora display (id >= 100000)
-     * with an extended row whose bound instance exists, yet which has no character component and no
+     * whose bound instance exists, yet which has no character component and no
      * pending setup, gets the pending bit set, up to kSetupKicks times; setup's outcome for such
      * units is logged whenever its state changes. Bounded: 16 units, 96 lines.
      */
@@ -188,8 +188,9 @@ namespace
     SetupWatch* Watch(void* self)
     {
         const void* fields = Read<void*>(self, unit::kOffUnitDescriptor);
-        if (!self || !fields || !Read<void*>(self, unit::kOffUnitDisplayExtra)
-            || Read<uint32_t>(fields, unit::kOffFieldDisplayId) < 100000u)
+        // Velora displays clone their race's display row, which carries no extended row: the
+        // display id alone selects these units.
+        if (!self || !fields || Read<uint32_t>(fields, unit::kOffFieldDisplayId) < 100000u)
             return nullptr;
         const uint64_t id = Read<uint64_t>(Read<void*>(self, unit::kOffObjectFields), 0);
         for (auto& watch : g_watches)
