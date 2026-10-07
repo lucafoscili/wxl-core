@@ -1,4 +1,5 @@
-// Widens the client's boot-time texture mip scratch so served textures up to 2048 load safely.
+// Widens the client's boot-time texture mip scratch and async read budget so served textures up to
+// 2048 load safely and stream like any other.
 // Copyright (C) 2026 WarcraftXL
 //
 // This program is free software: you can redistribute it and/or modify
@@ -27,6 +28,10 @@
 // patched through the Boot-phase installer seam (DllMain, before any client boot code), so the
 // allocation is made wide. Each site is verified against the stock operand first; an unexpected value
 // leaves the client untouched.
+//
+// The async read budget is the streaming half of the same limit: a texture file larger than the
+// client's 4 MB in-flight budget is never admitted, so a 2048 32-bpp texture requested in the world
+// waits until a loading screen or /reloadui forces it, and its model stays undrawn until then.
 namespace wxl::modern::assets::textures::blp
 {
     namespace
@@ -53,9 +58,33 @@ namespace wxl::modern::assets::textures::blp
                       gxoff::kMipScratchWideEdge);
             return true;
         }
+
+        bool WidenReadBudget()
+        {
+            const uintptr_t sites[2] = { gxoff::kTexReadBudgetRequestImm, gxoff::kTexReadBudgetPumpImm };
+            for (uintptr_t site : sites)
+            {
+                const uint32_t current = *reinterpret_cast<const uint32_t*>(site);
+                if (current != gxoff::kTexReadBudgetStock)
+                {
+                    WLOG_INFO("texture: read-budget operand at %08X is %08X, expected %08X - not patched",
+                              uint32_t(site), current, gxoff::kTexReadBudgetStock);
+                    return true;
+                }
+            }
+            for (uintptr_t site : sites)
+                wxl::mem::Patch(reinterpret_cast<void*>(site), &gxoff::kTexReadBudgetWide,
+                                      sizeof(uint32_t));
+            WLOG_INFO("texture: async read budget widened to %u MB (2048-wide chains stream)",
+                      gxoff::kTexReadBudgetWide >> 20);
+            return true;
+        }
     }
 }
 
 WXL_REGISTER_FEATURE_PHASED("wxl-modern-blp mip scratch", true,
                             wxl::modern::assets::textures::blp::WidenMipScratch,
+                            wxl::hook::Phase::Boot)
+WXL_REGISTER_FEATURE_PHASED("wxl-modern-blp read budget", true,
+                            wxl::modern::assets::textures::blp::WidenReadBudget,
                             wxl::hook::Phase::Boot)
