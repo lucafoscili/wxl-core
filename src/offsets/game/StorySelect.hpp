@@ -12,6 +12,11 @@ namespace wxl::offsets::game::story
     constexpr uintptr_t kRefresh = 0x004E4610;
     constexpr uintptr_t kSelectCharacter = 0x004E4580;
     constexpr uintptr_t kInitialize = 0x004E3CD0, kLighting = 0x004E3A20;
+    constexpr uintptr_t kInstanceCreateCall = 0x004E3E4A, kInstanceCreate = 0x0081F8F0;
+    constexpr size_t kRowName = 8, kRowNameSize = 48, kRowAppearance = 0x178;
+    // Glue GetServerName (0x4DD900) calls 0x6B0DC0: realmName CVar -> string +28.
+    constexpr uintptr_t kRealmNameCVar = 0x00C79D08;
+    constexpr size_t kCVarString = 0x28;
     constexpr uintptr_t kDetachParent = 0x008274F0;
     // Original ModelFFX methods; operate on its background, never a roster actor.
     constexpr uintptr_t kFrameSetCamera = 0x0095F9F0;
@@ -41,6 +46,7 @@ namespace wxl::offsets::game::story
         {0x004E3A23,5,RowRegister::EAX}, // per-resident ghost lighting
     };
     struct Site { const char* name; uintptr_t address; size_t size; uint64_t hash; };
+    inline constexpr Site kRealmNameSite = {"realmName",0x6B0DC0,0x30,0x26B80A2E6ACA3A57ULL};
     // Generated from the inspected executable by the feature's read-only inspector.
     inline constexpr Site kSites[] = {
         {"refresh", 0x4e4610, 0x1d8, 0xDB07F80DD822068CULL},

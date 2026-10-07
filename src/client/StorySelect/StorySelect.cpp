@@ -1,7 +1,9 @@
 // Actual roster residents through native equipment policy; no world unit or network operation.
 // GPL-3.0-or-later.
-#if defined(WXL_STORY_SELECT_TRIAL) || defined(WXL_CHARACTER_CAPACITY_TRIAL)
+#if defined(WXL_STORY_SELECT_TRIAL) || defined(WXL_CHARACTER_CAPACITY_TRIAL) || defined(WXL_SELECT_MODELS_TRIAL)
 #include "Performer.hpp"
+#include "ModelMap.hpp"
+#include "offsets/engine/Io.hpp"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -44,6 +46,59 @@ namespace
     bool InitializingRow() { return g_rowScope && g_rowScope->initializing; }
     __declspec(noinline) int __cdecl ContextIndex()
     { return g_rowScope ? g_rowScope->index : Read<int>(off::kSelected); }
+    std::vector<wxl::story::models::Entry> g_modelMap;
+    bool LoadModelMap()
+    {
+        FILE* file=nullptr;
+        if (fopen_s(&file,"WarcraftXL\\select-screen-models.bin","rb") || !file) return false;
+        std::vector<uint8_t> bytes(wxl::story::models::kHeaderSize +
+            wxl::story::models::kMaximum*wxl::story::models::kRecordSize + 1);
+        const size_t size=std::fread(bytes.data(),1,bytes.size(),file);
+        const bool failed=std::ferror(file)!=0;
+        std::fclose(file);
+        return !failed && wxl::story::models::Parse(bytes.data(),size,g_modelMap) && !g_modelMap.empty();
+    }
+    bool ModelAvailable(const char* path)
+    {
+        namespace io=wxl::offsets::engine::io;
+        void* handle=nullptr;
+        if (!wxl::game::Native<io::Storage_FileOpenFn>(io::kFileOpen)(nullptr,path,0,&handle) || !handle) return false;
+        uint8_t header[8]{}; uint32_t got=0;
+        const bool read=wxl::game::Native<io::Storage_FileReadFn>(io::kFileRead)(handle,header,8,&got,nullptr,0)!=0;
+        wxl::game::Native<io::Storage_FileCloseFn>(io::kFileClose)(handle);
+        const uint8_t expected[]={ 'M','D','2','0',8,1,0,0 }; // Wrath v264
+        return read && got==8 && !std::memcmp(header,expected,8);
+    }
+    // CALL-site adapter: ECX=scene; path,flags on stack; EAX=result; callee pops 8.
+    // EDX is ignored. Only the initializer's factory call is redirected.
+    void* __fastcall CreateSelectModel(void* scene, void*, const char* stock, uint32_t flags)
+    {
+        const wxl::story::models::Entry* entry=nullptr;
+        const auto rows=Read<uintptr_t>(off::kRows);
+        const auto count=Read<uint32_t>(off::kCount);
+        const int index=ContextIndex(); // Includes StorySelect's TLS resident scope.
+        const auto cvar=Read<uintptr_t>(off::kRealmNameCVar);
+        const char* realm=cvar ? Read<const char*>(cvar+off::kCVarString) : nullptr;
+        if (rows && realm && index>=0 && unsigned(index)<count && count<=wxl::story::models::kMaximum)
+        {
+            const auto row=rows+index*off::kRowStride;
+            const char* name=reinterpret_cast<const char*>(row+off::kRowName);
+            if (std::memchr(name,0,off::kRowNameSize))
+                entry=wxl::story::models::Find(g_modelMap,realm,Read<uint64_t>(row),name,
+                    reinterpret_cast<const uint8_t*>(row+off::kRowAppearance));
+        }
+        if (entry && !ModelAvailable(entry->model)) entry=nullptr;
+        using Factory=void*(__thiscall*)(void*,const char*,uint32_t);
+        return wxl::story::models::Create(entry,stock,flags,[scene](const char* path,uint32_t options) {
+            return wxl::game::Native<Factory>(off::kInstanceCreate)(scene,path,options);
+        });
+    }
+    bool InstallModelRedirect()
+    {
+        const uint32_t displacement=uint32_t(reinterpret_cast<uintptr_t>(&CreateSelectModel)-off::kInstanceCreateCall-5);
+        uint8_t bytes[5]={0xE8}; std::memcpy(bytes+1,&displacement,4);
+        return wxl::mem::Patch(reinterpret_cast<void*>(off::kInstanceCreateCall),bytes,sizeof(bytes));
+    }
     __declspec(noinline) float* __cdecl FacingTarget()
     { return InitializingRow() ? &g_rowScope->facingSink : reinterpret_cast<float*>(0xB6B204); }
     // PUSHAD layout: EDI, ESI, EBP, ESP, EBX, EDX, ECX, EAX. Preserve flags and every
@@ -790,14 +845,17 @@ namespace
     }
     bool Install()
     {
-        bool probe = false, capacity = false;
+        bool probe = false, capacity = false, models = false;
+#ifdef WXL_SELECT_MODELS_TRIAL
+        models = wxl::config::Env("WXL_SELECT_MODELS", false) && LoadModelMap();
+#endif
 #ifdef WXL_STORY_SELECT_TRIAL
         probe = wxl::config::Env("WXL_STORY_SELECT", true);
 #endif
 #ifdef WXL_CHARACTER_CAPACITY_TRIAL
         capacity = wxl::config::Env("WXL_CHARACTER_CAPACITY", true);
 #endif
-        if (!probe && !capacity) return true;
+        if (!probe && !capacity && !models) return true;
         if (reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) != 0x400000) return false;
         const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(0x400000);
         if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0 || dos->e_lfanew > 0x1000) return false;
@@ -819,6 +877,15 @@ namespace
                 if (value != site.hash) { WLOG_WARN("character-capacity: incompatible %s; stock only", site.name); return false; }
             }
         }
+        if (models)
+        {
+            uint64_t value=0xcbf29ce484222325ULL;
+            for (size_t i=0; i<off::kRealmNameSite.size; ++i)
+                value=(value^Read<uint8_t>(off::kRealmNameSite.address+i))*0x100000001b3ULL;
+            if (value!=off::kRealmNameSite.hash) return false;
+            if (!InstallModelRedirect()) return false;
+        }
+        if (!probe && !capacity) return true;
         if (!wxl::hook::Install("StorySelectValidate", script::kValidateCallbackSeam, &Validate, &g_validate) ||
             !wxl::hook::Install("StorySelectSelection", off::kSelectCharacter, &Select, &g_select) ||
             !wxl::hook::Install("StorySelectRefresh", off::kRefresh, &Refresh, &g_refresh) ||
