@@ -1548,6 +1548,10 @@ namespace wxl::offsets::game::m2
     /// The per-frame entry that rebuilds a character's composited appearance, the right place to force
     /// or suppress a rebuild. __thiscall, 1 stack arg.
     constexpr uintptr_t kCharRenderPrep                    = 0x004F1520;
+    /// Base-source readiness before composition: __thiscall(component, wait) -> bool, ret 4.
+    /// Called by both CharRenderPrep and the world component update queue (0x004F18F0).
+    /// A false result defers native submission; preserve the caller's wait policy.
+    constexpr uintptr_t kCharCheckBaseTextures             = 0x004ED640;
     /// The matching free, needed to keep an extension's component tracking exact. __cdecl, caller-
     /// cleaned.
     constexpr uintptr_t kCharFreeComponent                 = 0x004F16C0;

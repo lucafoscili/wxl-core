@@ -44,6 +44,8 @@ namespace
     /// The composition thread's per-request paint: __cdecl (request).
     using ComposeRequestFn = void(__cdecl*)(void* request);
     using AllocateRequestFn = void*(__cdecl*)();
+    /// Native source-readiness check: __thiscall, one wait argument, ret 4.
+    using CheckBaseTexturesFn = bool(__fastcall*)(void* component, void* edx, uint32_t wait);
 
     PaintRegionFn g_origPaintRegion = nullptr;
     PaintRegionFn g_origPaintFromOrigin = nullptr;
@@ -54,6 +56,7 @@ namespace
     ComposeRequestFn g_origComposeRequest = nullptr;
     SectionWalkFn g_origSubmitRequest = nullptr;
     AllocateRequestFn g_origAllocateRequest = nullptr;
+    CheckBaseTexturesFn g_origCheckBaseTextures = nullptr;
     sa::RequestSheets g_requestSheets;
 
     /**
@@ -131,13 +134,25 @@ namespace
         auto* format = reinterpret_cast<uint32_t*>(base + m2::kOffCharComponentFormat);
         if (*format != m2::kGxTexFormatDxt1)
             return;
-        if (*reinterpret_cast<void**>(base + m2::kOffCharComponentComposeRequest))
+        // Never change the format behind a queued/completed request or an existing GPU sheet.
+        // The native owner finishes/retires these; this retry only admits a new sheet.
+        if (*reinterpret_cast<void**>(base + m2::kOffCharComponentComposeRequest)
+            || Field(component, m2::kOffCharComponentSheet))
             return;
         const char* stem = ModelStem(component);
         if (!sa::IsCustomBody(stem))
             return;
         *format = m2::kGxTexFormatArgb8888;
         WLOG_INFO("skin-alpha: uncompressed sheet for %s", stem);
+    }
+
+    /// Both the world update queue and synchronous UI prep test sources before composing.
+    /// Retry identity here, not just in the UI's CharRenderPrep. DXT1 -> ARGB is the
+    /// completion marker: later checks do no work, and no rebuild bits are raised.
+    bool __fastcall hkCheckBaseTextures(void* component, void* edx, uint32_t wait)
+    {
+        UncompressCustomBody(component);
+        return g_origCheckBaseTextures(component, edx, wait);
     }
 
     /// As the component attaches to its model: the earliest point its model is known.
@@ -171,6 +186,8 @@ namespace
 
     void __fastcall hkSubmitRequest(void* component, void* edx)
     {
+        // Last chance before allocation captures identity and native copies the format.
+        UncompressCustomBody(component);
         sa::SheetScope scope(t_customSheet, CustomSheet(component));
         g_origSubmitRequest(component, edx);
     }
@@ -202,6 +219,8 @@ namespace
         wxl::hook::Install("CharCreateBaseTexture", m2::kCharCreateBaseTexture,
                            &hkCreateBaseTexture, &g_origCreateBaseTexture);
         wxl::hook::Install("CharInit", m2::kCharInit, &hkCharInit, &g_origCharInit);
+        wxl::hook::Install("CharCheckBaseTextures", m2::kCharCheckBaseTextures,
+                           &hkCheckBaseTextures, &g_origCheckBaseTextures);
         wxl::hook::Install("CharPrepSections", m2::kCharPrepSections, &hkPrepSections, &g_origPrepSections);
         wxl::hook::Install("CharUpdateSections", m2::kCharUpdateSections, &hkUpdateSections, &g_origUpdateSections);
         wxl::hook::Install("CharComposeRequestPaint", m2::kCharComposeRequestPaint,
