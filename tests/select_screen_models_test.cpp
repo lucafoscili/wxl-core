@@ -67,6 +67,39 @@ int main(int argc,char** argv)
     assert(Create(resident,"stock.m2",42,[&](const char* path,uint32_t flags)->void* {
         ++calls; assert(flags==42 && !std::strcmp(path,resident->model)); return reinterpret_cast<void*>(2);
     })==reinterpret_cast<void*>(2) && calls==1);
+    assert(ModelPath("Creature\\Tifa\\Tifa.m2"));
+    assert(ModelPath("Character\\Velora\\Person.m2"));
+    for (const char* path : {"Creature\\..\\bad.m2", "Creature\\.\\bad.m2",
+         "Creature\\\\bad.m2", "Creature/Tifa/Tifa.m2", "Creature\\C:\\bad.m2",
+         "Creature\\Tifa\\Tifa.M2", "World\\Tifa\\Tifa.m2", "creature\\Tifa.m2"})
+        assert(!ModelPath(path));
+    const Entry character=*selected;
+    auto creatureBytes=bytes;
+    std::memset(creatureBytes.data()+12+188,0,260);
+    std::strcpy(reinterpret_cast<char*>(creatureBytes.data()+12+188),"Creature\\Tifa\\Tifa.m2");
+    assert(Parse(creatureBytes.data(),creatureBytes.size(),map) && CreaturePath(map[0].model));
+    InstanceRegistry roots;
+    assert(!roots.Add(0) && !roots.Contains(0));
+    Entry creature=character; std::strcpy(creature.model,"Creature\\Tifa\\Tifa.m2");
+    auto mapped=[&](const char*,uint32_t)->void* { return reinterpret_cast<void*>(23); };
+    assert(Create(&creature,"stock.m2",42,mapped,&roots)==reinterpret_cast<void*>(23));
+    assert(roots.count==1 && roots.Contains(23) && !roots.Contains(24));
+    assert(roots.Add(23) && roots.count==1); // cached selection does not clear or duplicate
+    roots.Retire(24); assert(roots.Contains(23)); // attachments / other rows remain native
+    roots.Retire(23); assert(!roots.Contains(23) && roots.count==0); // free before reuse
+    assert(roots.Add(23)); roots.Retire(23); // world ownership handoff
+    assert(!roots.Contains(23));
+    calls=0;
+    assert(Create(&creature,"stock.m2",42,factory,&roots)==reinterpret_cast<void*>(1) && calls==2);
+    assert(roots.count==0); // null mapped result: stock fallback is never registered
+    assert(Create(&character,"stock.m2",42,mapped,&roots)==reinterpret_cast<void*>(23));
+    assert(roots.count==0); // Character rows remain native
+    for (uintptr_t i=1; i<=kMaximum; ++i) assert(roots.Add(i));
+    assert(!roots.Add(kMaximum+1));
+    calls=0;
+    assert(Create(&creature,"stock.m2",42,factory,&roots)==reinterpret_cast<void*>(1) && calls==1);
+    for (uintptr_t i=1; i<=kMaximum; ++i) roots.Retire(i);
+    assert(roots.count==0);
     auto bad=bytes; bad.push_back(0); assert(!Parse(bad.data(),bad.size(),map) && map.empty());
     assert(!Parse(bytes.data(),bytes.size()-1,map));
     bad=bytes; bad[0]=0; assert(!Parse(bad.data(),bad.size(),map));
