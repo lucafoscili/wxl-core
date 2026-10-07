@@ -114,7 +114,6 @@ namespace wxl::offsets::game::unit
     constexpr size_t kOffModelDataFlags = 0x04;
     constexpr size_t kOffPlayerSetupFlags = 0xF42;       // byte; bit 1 enables the bypass (0x006DE840)
     constexpr size_t kOffObjectFields = 0x08;            // -> object fields: guid, then type mask at +8
-    constexpr uint32_t kTypeMaskPlayer = 0x10;
 
     // --- signatures ---
     using CharSetupCreateFn  = int(__fastcall*)(void* unit, void* edx, void* appearance, int extended);
