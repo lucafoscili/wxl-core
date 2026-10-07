@@ -63,11 +63,14 @@ namespace
         namespace io=wxl::offsets::engine::io;
         void* handle=nullptr;
         if (!wxl::game::Native<io::Storage_FileOpenFn>(io::kFileOpen)(nullptr,path,0,&handle) || !handle) return false;
-        uint8_t header[8]{}; uint32_t got=0;
-        const bool read=wxl::game::Native<io::Storage_FileReadFn>(io::kFileRead)(handle,header,8,&got,nullptr,0)!=0;
+        // The whole Wrath header (0x138 bytes), not just its magic: the native loader accepts a file
+        // early and rejects a truncated one later (0x0083CF29), leaving the factory's ErrorCube in place
+        // of the stock model this row should fall back to.
+        uint8_t header[0x138]{}; uint32_t got=0;
+        const bool read=wxl::game::Native<io::Storage_FileReadFn>(io::kFileRead)(handle,header,sizeof(header),&got,nullptr,0)!=0;
         wxl::game::Native<io::Storage_FileCloseFn>(io::kFileClose)(handle);
         const uint8_t expected[]={ 'M','D','2','0',8,1,0,0 }; // Wrath v264
-        return read && got==8 && !std::memcmp(header,expected,8);
+        return read && got==sizeof(header) && !std::memcmp(header,expected,8);
     }
     // CALL-site adapter: ECX=scene; path,flags on stack; EAX=result; callee pops 8.
     // EDX is ignored. Only the initializer's factory call is redirected.

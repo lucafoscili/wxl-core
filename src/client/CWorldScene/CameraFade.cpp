@@ -102,5 +102,7 @@ namespace wxl::client::camerafade
 }
 
 #ifndef WXL_CAMERA_FADE_FIXTURE
-WXL_REGISTER_FEATURE("camera-fade", true, wxl::client::camerafade::Install)
+// Boot phase: the nine bytes are rewritten in DllMain, before any client code can reach them
+// (a Normal-phase worker could race the client executing 0x006079FD mid-write).
+WXL_REGISTER_FEATURE_PHASED("camera-fade", true, wxl::client::camerafade::Install, ::wxl::hook::Phase::Boot)
 #endif
