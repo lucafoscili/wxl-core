@@ -63,6 +63,9 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     add_executable(wxl-camera-fade-test EXCLUDE_FROM_ALL tests/camera_fade_fixture.cpp)
     target_include_directories(wxl-camera-fade-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_definitions(wxl-camera-fade-test PRIVATE ${WXL_DEFS})
+    add_executable(wxl-wide-skin-registry-test EXCLUDE_FROM_ALL tests/wide_skin_registry_fixture.cpp)
+    target_include_directories(wxl-wide-skin-registry-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(wxl-wide-skin-registry-test PRIVATE ${WXL_DEFS})
 
     # --- Automatic, recursive source discovery (no hand-written paths) -----------------------------
     # CONFIGURE_DEPENDS re-globs at build time, so dropping a file (or a whole script) needs no edit here.

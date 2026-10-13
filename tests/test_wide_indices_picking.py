@@ -70,6 +70,7 @@ LEGACY_NOTE = (
     "if (LegacyNoteMatches(g_wideSkins[i], liveSkin)) return &g_wideSkins[i]; "
     "return nullptr;")
 CURRENT_LEGACY = (
+    "if (call.generation != call.note->pickingGeneration) return false; "
     "const M2SkinProfile* live = LivePickingSkin(call.instance); "
     "return live == call.skin && LegacyNoteMatches(*call.note, live);")
 
@@ -247,7 +248,7 @@ class WidePickingTests(unittest.TestCase):
     def test_registry_remains_bounded_and_owns_added_state(self):
         self.assertIn("kMaxWideSkins = 64;", SOURCE)
         self.assertIn("WideSkinNote notes[kMaxWideSkins]", SOURCE)
-        self.assertIn("if (g_wideSkinCount == kMaxWideSkins)", SOURCE)
+        self.assertIn("if (!available && g_wideSkinCount == kMaxWideSkins)", SOURCE)
         registry = SOURCE[SOURCE.index("    struct WideSkinRegistry"):SOURCE.index("    size_t g_wideSkinCount")]
         for field in ("geometryNext", "fillNext[3]", "pickingLogs"):
             self.assertIn(field, registry)
@@ -263,7 +264,8 @@ class WidePickingTests(unittest.TestCase):
         run = code(body("RunPickingGeometry"))
         self.assertIn("return g_wideSkins.geometryNext(" + GEOMETRY_ARGS + ");", run)
         self.assertIn("call.legacy = legacy;", run)
-        self.assertIn("~Scope() { note.pickingCall = previous; }", run)
+        self.assertIn("~Scope() { if (note.pickingCall == current) note.pickingCall = previous; }", run)
+        self.assertIn("scope { note, &call, note.pickingCall };", run)
         self.assertIn("note.pickingCall = &call;", run)
         for forbidden in ("skin->batches", "materialLayer", "boneInfluences", "bestDepth ="):
             self.assertNotIn(forbidden, run)

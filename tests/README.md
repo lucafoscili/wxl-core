@@ -107,7 +107,21 @@ The existing 64-entry wide-skin registry records the model, skin/index identity,
 vertex count, and successfully converted shared IB. A shared rebuild clears its
 conversion marker before the native fill; failed custom locks or a full registry
 do not activate converted draws. Instance-index notes preserve an unchanged
-shared conversion. This bounded registry does not recycle entries in this Beta.
+shared conversion. Notes retire at the native shared-model destructor
+(`0x0083D5B0`), before it frees the skin. Retirement clears the picking link and
+all buffer/source bindings and advances the picking generation. Empty slots are
+reused without moving live notes; empty trailing slots leave the draw scan.
+The full-registry warning remains for more than 64 simultaneously live wide skins.
+
+The offline `wxl-wide-skin-registry-test` target includes the production hooks
+with stubbed native continuations. It exercises more than 64 distinct skin
+lifetimes, overflow, slot reuse, binding retirement before the native destructor,
+index-only notes, and nested picking scopes across release and address reuse:
+
+```powershell
+cmake --build <offline-build> --config Release --target wxl-wide-skin-registry-test
+<offline-build>/Release/wxl-wide-skin-registry-test.exe
+```
 
 A converted draw requires the matching shared IB, the model's actual shared VB,
 stride 48, base mode 0, one copy, and a valid section. It adds the section's full

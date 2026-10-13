@@ -58,6 +58,7 @@ namespace
     off::M2_SharedSetIndicesFn  g_origSharedSetIndices = nullptr;
     gxoff::GxDeviceDrawFn       g_origDeviceDraw       = nullptr;
     off::M2_SharedSetVerticesFn g_origSharedSetVertices = nullptr;
+    off::M2_SharedDestroyFn     g_origSharedDestroy     = nullptr;
     using DrawBatchFn = void(__fastcall*)(void* ctx, void* edx);
     DrawBatchFn                 g_origDrawBatch        = nullptr;
 
@@ -234,9 +235,11 @@ namespace
     WideSkinNote* NoteWideSkin(const M2SkinProfile* skin)
     {
         if (!skin || !skin->indices) return nullptr;
+        WideSkinNote* available = nullptr;
         for (size_t i = 0; i < g_wideSkinCount; ++i)
         {
             WideSkinNote& n = g_wideSkins[i];
+            if (!n.skin && !available) available = &n;
             if (n.skin != skin) continue;
             // Instance-index notes must not erase a still-valid shared conversion.
             if (n.indices != skin->indices || n.indexCount != skin->indexCount
@@ -252,23 +255,24 @@ namespace
             }
             return &n;
         }
-        if (g_wideSkinCount == kMaxWideSkins)
+        if (!available && g_wideSkinCount == kMaxWideSkins)
         {
-            // Notes never retire when a model frees, so a long session can fill the registry. Say so:
-            // from here a wide skin draws without its window conversion, and hovering it can reach
-            // the stock triangle test (0x0081D569). Fail loud, 13 October 2026.
+            // Retired slots are reused, but more than 64 simultaneously live wide skins can still
+            // overflow. Keep the warning: an unnoted skin can reach the stock test (0x0081D569).
             static bool warned = false;
             if (!warned)
             {
                 warned = true;
-                WLOG_WARN("m2wide: wide-skin registry full (%u); skin=%p (%u vertices, %u indices) and later "
-                          "wide skins draw without window conversion; hovering them may crash",
+                WLOG_WARN("m2wide: wide-skin registry full (%u); skin=%p (%u vertices, %u indices) has no slot; "
+                          "untracked wide skins draw without window conversion; hovering them may crash",
                           static_cast<unsigned>(kMaxWideSkins), skin, skin->vertexCount, skin->indexCount);
             }
             return nullptr;
         }
-        WideSkinNote& n = g_wideSkins[g_wideSkinCount++];
+        WideSkinNote& n = available ? *available : g_wideSkins[g_wideSkinCount++];
+        const uint64_t generation = n.pickingGeneration;
         n = { skin, skin->indices, skin->indexCount, skin->vertexCount, nullptr, nullptr };
+        n.pickingGeneration = generation;
         return &n;
     }
 
@@ -283,6 +287,29 @@ namespace
                 if (clearVertices) g_wideSkins[i].refilledSharedVb = nullptr;
                 ++g_wideSkins[i].pickingGeneration;
             }
+    }
+
+    // Wow.exe 3.3.5a 12340: CM2Shared::Destroy (0x0083D5B0, ECX=this, no stack args)
+    // calls DestroyBuffers at 0x0083D6A3, reads skin [ESI+0x170] at 0x0083D6C3 and
+    // frees it through kBufferFree (0x0083DE90) at 0x0083D6D8. Retire before forwarding;
+    // SharedRelease (0x0083DC90) can leave a zero-ref model cached and still live.
+    void __fastcall hkSharedDestroy(void* model, void* edx)
+    {
+        const auto* skin = *At<M2SkinProfile*>(model, off::kOffModelSkin);
+        for (size_t i = 0; i < g_wideSkinCount; ++i)
+        {
+            WideSkinNote& n = g_wideSkins[i];
+            // Index-only notes have no model binding; match the owner's live skin as well.
+            // Stored addresses are comparison keys only, never dereferenced during retirement.
+            if (!n.skin || (n.model != model && n.skin != skin)) continue;
+            const uint64_t generation = n.pickingGeneration + 1;
+            n = {};
+            n.pickingGeneration = generation;
+        }
+        // Do not move live notes: geometry scopes borrow their addresses. Empty trailing slots
+        // can leave the draw scan immediately; NoteWideSkin reuses holes inside the live range.
+        while (g_wideSkinCount && !g_wideSkins[g_wideSkinCount - 1].skin) --g_wideSkinCount;
+        g_origSharedDestroy(model, edx);
     }
 
     // A vertex rebuild retires only the vertex repair: converted indices stay true to their own
@@ -1063,6 +1090,7 @@ namespace
     // A legacy frame stays usable while its instance still walks the same noted skin.
     bool CurrentLegacyCall(const PickingCall& call)
     {
+        if (call.generation != call.note->pickingGeneration) return false;
         const M2SkinProfile* live = LivePickingSkin(call.instance);
         return live == call.skin && LegacyNoteMatches(*call.note, live);
     }
@@ -1146,9 +1174,11 @@ namespace
         struct Scope
         {
             WideSkinNote& note;
+            PickingCall* current;
             PickingCall* previous;
-            ~Scope() { note.pickingCall = previous; }
-        } scope { note, note.pickingCall };
+            // A release clears the link; this scope must not resurrect it after slot reuse.
+            ~Scope() { if (note.pickingCall == current) note.pickingCall = previous; }
+        } scope { note, &call, note.pickingCall };
         note.pickingCall = &call;
         return g_wideSkins.geometryNext(scene, edx, instance, mode, projection, distance,
                                         point, candidate, bestDepth, currentHit);
@@ -1526,6 +1556,9 @@ namespace
 
     bool InstallWideIndices()
     {
+        if (!wxl::hook::Install("M2SharedDestroy", off::kSharedDestroy,
+                                &hkSharedDestroy, &g_origSharedDestroy))
+            return false;
         if (!wxl::hook::Install("M2SetModelIndices", off::kSetModelIndices,
                                 &hkSetModelIndices, &g_origSetModelIndices))
             return false;

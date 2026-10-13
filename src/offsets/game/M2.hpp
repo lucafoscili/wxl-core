@@ -2383,6 +2383,7 @@ namespace wxl::offsets::game::m2
     /// Free extension-side allocations hung off a shared model at the single point where the client
     /// tears the object down. __thiscall, caller-cleaned.
     constexpr uintptr_t kSharedDestroy                     = 0x0083D5B0;
+    using M2_SharedDestroyFn = void(__fastcall*)(void* shared, void* edx);
     /// Track shared-model refcount drops so extension-owned side data attached to a model can be freed
     /// at the right moment. __thiscall, caller-cleaned.
     constexpr uintptr_t kSharedRelease                     = 0x0083DC90;
