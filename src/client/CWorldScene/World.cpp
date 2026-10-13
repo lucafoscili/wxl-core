@@ -36,22 +36,39 @@ namespace
     namespace adt   = wxl::offsets::game::adt;
     namespace aprof = wxl::runtime::assetprof;
 
-    wld::World_EnterFn g_origWorldEnter = nullptr;
-    frame::FramePumpFn g_origFramePump  = nullptr;
+    wld::World_MapEnterFn  g_origMapEnter  = nullptr;
+    wld::World_MapUnloadFn g_origMapUnload = nullptr;
+    frame::FramePumpFn     g_origFramePump = nullptr;
 
     /**
-     * @brief Detours world enter, emitting OnWorldLeave before and OnWorldEnter after the transition.
-     * @param worldTime          target world time.
-     * @param withLoadingScreen  nonzero to show the loading screen.
+     * @brief Publishes leave while the old map is still loaded.
+     *
+     * Native transfers unload separately; direct SDK map loads replace the map themselves. The
+     * native lifetime flag covers both without duplicating leave after unload, and excludes the
+     * first login. The map id alone cannot do this: native unload leaves its previous value intact.
      */
-    void __cdecl hkWorldEnter(int worldTime, int withLoadingScreen)
+    void EmitWorldLeave()
     {
-        const auto mapId = static_cast<uint32_t>(*reinterpret_cast<int32_t*>(wld::kCurrentMapId));
-        ev::WorldLeaveArgs leave{ mapId }; // old world still loaded: id is the one being left
+        if (!wxl::mem::Read<uint32_t>(wld::kMapLoaded)) return;
+        const auto mapId = static_cast<uint32_t>(wxl::mem::Read<int32_t>(wld::kCurrentMapId));
+        ev::WorldLeaveArgs leave{ mapId };
+        WLOG_DEBUG("[world] OnWorldLeave mapId=%u", mapId);
         ev::Emit(ev::Event::OnWorldLeave, &leave);
-        g_origWorldEnter(worldTime, withLoadingScreen);
-        const auto entered = static_cast<uint32_t>(*reinterpret_cast<int32_t*>(wld::kCurrentMapId));
+    }
+
+    void __cdecl hkMapUnload()
+    {
+        EmitWorldLeave();
+        g_origMapUnload();
+    }
+
+    void __cdecl hkMapEnter(const char* mapDir, int mapId)
+    {
+        EmitWorldLeave();
+        g_origMapEnter(mapDir, mapId);
+        const auto entered = static_cast<uint32_t>(wxl::mem::Read<int32_t>(wld::kCurrentMapId));
         ev::WorldEnterArgs enter{ entered };
+        WLOG_DEBUG("[world] OnWorldEnter mapId=%u", entered);
         ev::Emit(ev::Event::OnWorldEnter, &enter);
     }
 
@@ -73,7 +90,8 @@ namespace
 
     bool InstallWorld()
     {
-        wxl::hook::Install("CWorldEnter", wld::kEnter, &hkWorldEnter, &g_origWorldEnter);
+        wxl::hook::Install("WorldMapUnload", wld::kMapUnload, &hkMapUnload, &g_origMapUnload);
+        wxl::hook::Install("WorldMapEnter", wld::kMapEnter, &hkMapEnter, &g_origMapEnter);
         wxl::hook::Install("FramePump", frame::kFramePump, &hkFramePump, &g_origFramePump);
 
         // Liquid-row null guard: this one liquid consumer dereferences the LiquidType row flag without the

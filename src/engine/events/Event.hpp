@@ -59,7 +59,7 @@ namespace wxl::events
         OnDoodadSpawn,   // a placed map doodad object was built       (DoodadSpawnArgs)
         OnItemSlotChange,// a character model slot received an item    (ItemSlotChangeArgs)
         OnItemSlotClear, // a character model equipment slot was cleared(ItemSlotClearArgs)
-        OnWorldEnter,    // the world/map finished loading, in-world   (WorldEnterArgs)
+        OnWorldEnter,    // map loaded; player objects may arrive later (WorldEnterArgs)
         OnWorldLeave,    // the world/map is being torn down           (WorldLeaveArgs)
         OnGrassWind,     // grass wind integrator advanced this frame (GrassWindArgs)
         OnAdtHeightBlend,// a terrain PS permutation was patched for height blending (AdtHeightBlendArgs)
@@ -244,9 +244,9 @@ namespace wxl::events
      *         vertex shader. renderCtx is the M2Instance whose bone palette was just written.
      *         Subscribers may overwrite bone matrices here to override the engine's pose. */
     struct BuildBonePaletteArgs { void* renderCtx; };
-    /** @brief Args for OnWorldEnter. */
+    /** @brief Loaded map id, including first login. Fires after the native map loader returns. */
     struct WorldEnterArgs    { uint32_t mapId; };
-    /** @brief Args for OnWorldLeave. */
+    /** @brief Map id being unloaded/replaced. Logout to character select emits leave only. */
     struct WorldLeaveArgs    { uint32_t mapId; };
     /**
      * @brief Args for OnGrassWind, emitted once per frame when the grass-wind integrator advances (only

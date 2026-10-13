@@ -205,7 +205,7 @@ namespace wxl::runtime::hookpoints
 
             // --- world tick, map lifecycle, streaming and picking ------------------------------------
             { "World.Tick",                                wld::kTick },
-            { "World.Enter",                               wld::kEnter },
+            { "World.Recenter",                            wld::kRecenter },
             { "World.MapEnter",                            wld::kMapEnter },
             { "World.PrepareUpdate",                       wld::kPrepareUpdate },
             { "World.Render",                              wld::kRender },

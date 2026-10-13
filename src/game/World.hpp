@@ -50,7 +50,7 @@ namespace wxl::game::world
 
     /**
      * @brief Reads the map the terrain renderer currently holds.
-     * @return The map id, or -1 when no map is loaded.
+     * @return The last loaded map id, or -1 before the first load. Native unload retains the old id.
      */
     inline int CurrentMapId()
     { return *reinterpret_cast<int*>(woff::kCurrentMapId); }

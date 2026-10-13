@@ -29,11 +29,18 @@ namespace wxl::offsets::game::world
     constexpr uintptr_t kTick = 0x007B6B00;
     // Load-gate flag (u32): nonzero while the blocking drain runs.
     constexpr uintptr_t kLoadActive = 0x00ADFBC8;
-    // CWorld::Enter(time, withLoadingScreen): unloads the old world and loads the new one (calls the
-    // blocking load), then dismisses the loading screen. At entry the old world is still intact (leave
-    // point); after it returns the new world + objects are resident (enter point).
-    constexpr uintptr_t kEnter = 0x00781500;
-    using World_EnterFn = void(__cdecl*)(int worldTime, int withLoadingScreen);
+    // Re-centres/preloads the CURRENT map; this is not world entry. 12340 disassembly (Wow.exe and
+    // Wow.exe.orig, 2026-10-13): 0x00780860 copies position[0..2] to kFocusPosX/Y/Z, then this calls
+    // kMapPreload, optionally showing/dismissing a loading screen. No map id/name argument or map load.
+    // All five direct call sites:
+    //  - 0x0051D84D / 0x00526434: camera/focus reposition, squared distance > 900 (30 yards), screen=0.
+    //  - 0x006E826D: local-player setup (0x006E7F50, called at 0x006E8378 after a player GUID match),
+    //    only with streaming enabled (0x00422130) and a nonzero transport GUID (vtable +0x40), screen=1.
+    //  - 0x0071375A: moving gameobject/transport update (0x007134A0), changed path segment with the
+    //    camera target aboard (0x007132E0); passes that target's position, screen=0.
+    //  - 0x0074B64A: position update matching the camera-follow GUID, screen=1.
+    constexpr uintptr_t kRecenter = 0x00781500;
+    using World_RecenterFn = void(__cdecl*)(const float* position, int withLoadingScreen);
     // Focus world position floats X/Y/Z (the center of the load box / player position).
     constexpr uintptr_t kFocusPosX = 0x00CD7778;
     constexpr uintptr_t kFocusPosY = 0x00CD777C;
@@ -153,13 +160,22 @@ namespace wxl::offsets::game::world
     using World_RenderFn = void(__cdecl*)(const float* viewerPos, uint32_t flags);
 
     // --- current map ---
-    // Numeric map id of the loaded world (int32; -1 while none). The map loader writes it before
-    // CWorld::Enter returns, so it is valid at the enter hook and still valid at the leave hook.
+    // Numeric map id (int32): initialized to -1 at 0x0079E895, written at 0x007BFD90. Unload leaves
+    // this id stale; use kMapLoaded to distinguish an active map from the last map after logout.
     constexpr uintptr_t kCurrentMapId = 0x00ADFBC4;
+    // Native map-lifetime flag (u32): initialized to 0 at 0x0079E8A5, set to 1 at 0x007BFD96,
+    // cleared by kMapUnloadTiles at 0x007C39AF. kMapUnload itself tests it at 0x00783185.
+    constexpr uintptr_t kMapLoaded = 0x00CF08F0;
 
     // Map change: repoints the dir/name/wdt-path globals to <mapDir>, purges the loaded tiles, loads that
     // map's WDT (present table) + WDL, re-streams around the current camera, and drains the pending reads.
     // The player is not moved. mapId is written to kCurrentMapId.
+    // 12340 trace in both executables: sole native caller 0x007814B2 in kMapLoadBegin. Login reaches
+    // it via 0x004DB8F5 -> 0x00405540 -> 0x00405806; SMSG_NEW_WORLD (0x00403D10) schedules
+    // 0x00403B70, which calls kMapUnload at 0x00403BD3, then kMapLoadBegin at 0x00403C3F.
+    // The cross-map 0x00403DE0 handler also calls 0x00403B70 (0x00403EA3). Direct SDK EnterMap
+    // calls bypass kMapLoadBegin/kMapUnload, so this is the common enter hook (after return), and
+    // also a leave point if kMapLoaded was still set on entry. Player objects may arrive later.
     constexpr uintptr_t kMapEnter = 0x007BFCE0;
     using World_MapEnterFn = void(__cdecl*)(const char* mapDir, int mapId);
 
@@ -388,13 +404,16 @@ namespace wxl::offsets::game::world
     /// The world subsystem's construction point - the earliest safe place to install world-scoped
     /// state, after the GX device exists but before any map is touched. __cdecl, caller-cleaned.
     constexpr uintptr_t kInitialize                        = 0x00780F50;
-    /// Single choke point where a map id/name enters the engine - an extension can rewrite the target
-    /// map, stage per-map assets, or fire a "map loading" event before any tile work starts. __cdecl,
-    /// caller-cleaned.
+    /// Native map-load wrapper: sets far clip and focus, then calls kMapEnter. Native callers pass
+    /// (mapDir, position, mapId, 1); the fourth argument is unused. SDK EnterMap bypasses this wrapper.
     constexpr uintptr_t kMapLoadBegin                      = 0x00781430;
-    /// The exact moment the current map is torn down, so an extension can flush its own per-map caches
-    /// in lockstep with the engine. __cdecl, caller-cleaned.
+    /// World teardown, void __cdecl(): clears scene objects (0x00782E40), then unloads map tiles if
+    /// kMapLoaded. Hook BEFORE it for leave. Both 12340 executables have two callers: cross-map
+    /// 0x00403BD3 and logout 0x0040662D in 0x00406510. The latter switches to "charselect"/"login"
+    /// at 0x004066BA without loading another map: leave only, no enter. Unload clears kMapLoaded,
+    /// not kCurrentMapId, so the following map-enter hook must not emit a second leave.
     constexpr uintptr_t kMapUnload                         = 0x00783180;
+    using World_MapUnloadFn = void(__cdecl*)();
     /// Symmetric teardown hook for anything installed at World.Initialize. __cdecl, caller-cleaned.
     constexpr uintptr_t kShutdown                          = 0x007837F0;
     /// Where the tile heaps and the tile grid are sized and built - the place to widen or instrument
