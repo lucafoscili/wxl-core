@@ -252,7 +252,21 @@ namespace
             }
             return &n;
         }
-        if (g_wideSkinCount == kMaxWideSkins) return nullptr;
+        if (g_wideSkinCount == kMaxWideSkins)
+        {
+            // Notes never retire when a model frees, so a long session can fill the registry. Say so:
+            // from here a wide skin draws without its window conversion, and hovering it can reach
+            // the stock triangle test (0x0081D569). Fail loud, 13 October 2026.
+            static bool warned = false;
+            if (!warned)
+            {
+                warned = true;
+                WLOG_WARN("m2wide: wide-skin registry full (%u); skin=%p (%u vertices, %u indices) and later "
+                          "wide skins draw without window conversion; hovering them may crash",
+                          static_cast<unsigned>(kMaxWideSkins), skin, skin->vertexCount, skin->indexCount);
+            }
+            return nullptr;
+        }
         WideSkinNote& n = g_wideSkins[g_wideSkinCount++];
         n = { skin, skin->indices, skin->indexCount, skin->vertexCount, nullptr, nullptr };
         return &n;

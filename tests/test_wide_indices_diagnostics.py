@@ -114,7 +114,8 @@ class WideDiagnosticTests(unittest.TestCase):
         self.assertLess(refill.index("CommitIndexBuffer(device, buffer);"),
                         refill.index("windowNote->convertedSharedIb = buffer;"))
         note = body("NoteWideSkin")
-        self.assertIn("if (g_wideSkinCount == kMaxWideSkins) return nullptr;", note)
+        self.assertIn("if (g_wideSkinCount == kMaxWideSkins)", note)
+        self.assertIn("wide-skin registry full", note)
         # An unrelated instance note preserves a conversion unless skin identity changed.
         self.assertIn("n.indices != skin->indices || n.indexCount != skin->indexCount", note)
         self.assertIn("n.vertexCount != skin->vertexCount", note)

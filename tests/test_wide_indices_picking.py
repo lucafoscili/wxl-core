@@ -247,7 +247,7 @@ class WidePickingTests(unittest.TestCase):
     def test_registry_remains_bounded_and_owns_added_state(self):
         self.assertIn("kMaxWideSkins = 64;", SOURCE)
         self.assertIn("WideSkinNote notes[kMaxWideSkins]", SOURCE)
-        self.assertIn("if (g_wideSkinCount == kMaxWideSkins) return nullptr;", SOURCE)
+        self.assertIn("if (g_wideSkinCount == kMaxWideSkins)", SOURCE)
         registry = SOURCE[SOURCE.index("    struct WideSkinRegistry"):SOURCE.index("    size_t g_wideSkinCount")]
         for field in ("geometryNext", "fillNext[3]", "pickingLogs"):
             self.assertIn(field, registry)
