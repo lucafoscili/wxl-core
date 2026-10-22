@@ -40,6 +40,10 @@
 # Log every client-provider claim / client-transform reshape (storage debug mode).
 #WXL_VERBOSE_ASSET_LOGS=0
 
+# ----------------------------------------------------------------------------- Text-emote sounds (client)
+# Extend the native lookup to race IDs 0..63 before DBC loading (requires matching sound rows).
+#WXL_EMOTE_SOUNDS=1
+
 # ----------------------------------------------------------------------------- Profilers
 # Client: asset phases + frame-hitch histogram (h25/h50/h100).
 #WXL_CLIENT_ASSET_PROFILE=1

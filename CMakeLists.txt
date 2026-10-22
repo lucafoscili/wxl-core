@@ -69,6 +69,11 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     add_executable(wxl-race-tables-test EXCLUDE_FROM_ALL tests/race_tables_test.cpp)
     target_include_directories(wxl-race-tables-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_definitions(wxl-race-tables-test PRIVATE ${WXL_DEFS})
+    add_executable(wxl-emote-sounds-test EXCLUDE_FROM_ALL tests/emote_sounds_test.cpp)
+    target_include_directories(wxl-emote-sounds-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(wxl-emote-sounds-test PRIVATE ${WXL_DEFS})
+    # Keep the fixture image away from its synthetic client instruction window at 0x004C0000.
+    target_link_options(wxl-emote-sounds-test PRIVATE "/BASE:0x10000000")
 
     # --- Automatic, recursive source discovery (no hand-written paths) -----------------------------
     # CONFIGURE_DEPENDS re-globs at build time, so dropping a file (or a whole script) needs no edit here.

@@ -20,9 +20,12 @@
 #include "engine/events/Event.hpp"
 
 #include "common/Log.hpp"
+#include "common/Config.hpp"
+#include "common/Mem.hpp"
 #include "offsets/engine/Sound.hpp"
 
 #include <cstdint>
+#include <iterator>
 #include <unordered_set>
 
 namespace
@@ -81,3 +84,52 @@ namespace
 }
 
 WXL_REGISTER_FEATURE("sound", true, InstallSound)
+
+namespace wxl::client::emotesounds
+{
+    namespace off = wxl::offsets::engine::sound::emotesounds;
+
+    template<class ReadByte>
+    bool VerifySites(ReadByte read)
+    {
+        for (const auto& site : off::kSites)
+            for (size_t i = 0; i < site.expected.size(); ++i)
+                if (read(site.address + i) != static_cast<uint8_t>(site.expected[i]))
+                {
+                    WLOG_ERROR("emote-sounds: incompatible %s at 0x%08X; no patches applied",
+                               site.name, static_cast<unsigned>(site.address));
+                    return false;
+                }
+        return true;
+    }
+
+    bool Install()
+    {
+        if (!wxl::config::Env("WXL_EMOTE_SOUNDS", true))
+        {
+            WLOG_INFO("emote-sounds: disabled by WXL_EMOTE_SOUNDS");
+            return true;
+        }
+        if (!VerifySites(wxl::mem::Read<uint8_t>)) return false;
+
+        // One .text write window: a failed unprotect changes nothing. Boot runs before native
+        // lookup allocation/loading; no live records exist to migrate and no detour is needed.
+        const auto& first = off::kSites[0];
+        const auto& last = off::kSites[std::size(off::kSites) - 1];
+        if (!wxl::mem::WithWritable(reinterpret_cast<void*>(first.address),
+                                   last.address + last.expected.size() - first.address, [&] {
+            for (const auto& site : off::kSites)
+                std::memcpy(reinterpret_cast<void*>(site.address + site.operand),
+                            &site.value, site.width);
+        }))
+        {
+            WLOG_ERROR("emote-sounds: allocationSize..fillRace code window at 0x%08X is not writable; no patches applied",
+                       static_cast<unsigned>(first.address));
+            return false;
+        }
+        WLOG_INFO("emote-sounds: IDs 0..63 installed; 128 sound slots, record stride 0x204");
+        return true;
+    }
+}
+
+WXL_REGISTER_FEATURE_PHASED("emote-sounds", true, wxl::client::emotesounds::Install, ::wxl::hook::Phase::Boot)

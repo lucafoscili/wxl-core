@@ -26,7 +26,8 @@ Names borrow the native string block for its lifetime. No DBC is loaded by WXL.
 
 The restriction switch and original handling for races 1..11 remain unchanged;
 12..63 return numeric zero. Race 0 and IDs above 63 retain the error path.
-Text-emote sound storage, GlueXML and client data are outside this feature.
+Text-emote sound storage has its own [SE2 feature](../SE2/README.md).
+GlueXML and client data are outside this feature.
 
 Configure with `cmake -S . -B <temp-build> -A Win32 -DCLIENT_PATH:PATH=`.
 Build `WarcraftXL` and `wxl-race-tables-test` with `--config Release`, then run
@@ -38,4 +39,4 @@ it never loads a game client. Run the existing suite with
 Beta after 24 October still needs creator race/sex switching and exit/reentry,
 stock/new race restriction queries, DK name/sound and trial-loading text paths,
 and creation/login with actual ChrRaces/Glue data. Offline checks cannot establish
-those in-client results; new races' text emotes remain silent as scoped.
+those in-client results; text-emote audio needs the SE2 feature and matching client data.
