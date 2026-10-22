@@ -17,7 +17,9 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include "offsets/game/DB2.hpp"
 
 // INTERNAL to the core. Character-creation globals and the code sites that hardcode their extent.
 namespace wxl::offsets::game::charcreate
@@ -73,4 +75,42 @@ namespace wxl::offsets::game::charcreate
     // the loop frees exactly count * kPreferenceSexes dwords. Both loops are do/while: a count of 0
     // would walk 2^32 slots.
     constexpr uintptr_t kPreferenceFreeRaceCountSite = 0x004E1E9B;
+
+    // Raw race-indexed name tokens shared by DK sounds and EnterWorld's trial-loading text.
+    // Preserve the stock 0..21 pointers; later slots come from loaded ChrRaces.ClientFileString.
+    constexpr uintptr_t kRaceNames = 0x00B24180;
+    inline constexpr uintptr_t kRaceNameBaseSites[] = {0x004CDA43, 0x004D9EB0};
+    constexpr uint32_t kExpandedRaces = 64;
+    constexpr uint32_t kExpandedPreferenceBytes = kExpandedRaces * kPreferenceSexes * 4;
+
+    // IsRaceClassRestricted: EAX is race-1. Keep the 1..11 switch; the JA alone is retargeted.
+    constexpr uintptr_t kRestrictionBranch = 0x004DFAF0;
+    constexpr uintptr_t kRestrictionResult = 0x004DFC18; // consumes one x87 value
+    constexpr uintptr_t kRestrictionError = 0x004DFC32;
+
+    struct Site { const char* name; uintptr_t address; size_t size; uint64_t hash; };
+    // FNV-1a-64 over complete instructions in the traced 3.3.5a (12340) image.
+    // Check the whole set before changing any operand, including the unchanged thunk targets.
+    inline constexpr Site kSites[] = {
+        {"preferenceSexRead",     0x004E157A, 7, 0x4D945FB8B96B846BULL},
+        {"preferenceSexWrite",    0x004E15B2, 7, 0x0DF94B112BDD49B9ULL},
+        {"preferenceSexRestore",  0x004E16A0, 7, 0xCF7BEFC5308EDDD3ULL},
+        {"preferenceInitBase",    0x004E1C39, 5, 0x067713B3EC9E21C1ULL},
+        {"preferenceFreeBase",    0x004E1E93, 5, 0x08495C085166FFB7ULL},
+        {"preferenceRaceRead",    0x004E20EB, 7, 0x7DAE3FE85C83BA3BULL},
+        {"preferenceRaceWrite",   0x004E2124, 7, 0x0DF94B112BDD49B9ULL},
+        {"preferenceRaceRestore", 0x004E2227, 7, 0xB57BEF7915BA8EDBULL},
+        {"preferenceInitLength",  0x004E1C33, 5, 0xE2648AD702120957ULL},
+        {"preferenceFreeCount",   0x004E1E98, 7, 0x0AC3ACBE4E114FD9ULL},
+        {"raceName",              0x004CDA40, 7, 0x6745E1DFABC6C670ULL},
+        {"trialRaceName",         0x004D9EAD, 7, 0x530AF25026C94A90ULL},
+        {"restrictionBranch",     kRestrictionBranch, 6, 0xB747AAB17CAC21CCULL},
+        {"restrictionIndex",      0x004DFADB, 3, 0x4746321AEE237236ULL},
+        {"restrictionBound",      0x004DFAE1, 3, 0x3992131AE7661D7CULL},
+        {"restrictionSwitch",     0x004DFAF6, 7, 0xEB35A1F26CE2B8D0ULL},
+        {"restrictionResult",     kRestrictionResult, 12, 0x5B0CA3DF66BFD2F3ULL},
+        {"restrictionError",      kRestrictionError, 14, 0x29E595F9A0976C80ULL},
+        {"chrRacesLoad",          db2::chrraces::kLoader, 9, 0x57043B863AADE1CAULL},
+        {"chrRacesLoaded",        db2::chrraces::kLoadComplete, 14, 0x8B7B4DD931E741C2ULL},
+    };
 }

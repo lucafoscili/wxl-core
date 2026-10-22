@@ -66,6 +66,9 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     add_executable(wxl-wide-skin-registry-test EXCLUDE_FROM_ALL tests/wide_skin_registry_fixture.cpp)
     target_include_directories(wxl-wide-skin-registry-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_definitions(wxl-wide-skin-registry-test PRIVATE ${WXL_DEFS})
+    add_executable(wxl-race-tables-test EXCLUDE_FROM_ALL tests/race_tables_test.cpp)
+    target_include_directories(wxl-race-tables-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(wxl-race-tables-test PRIVATE ${WXL_DEFS})
 
     # --- Automatic, recursive source discovery (no hand-written paths) -----------------------------
     # CONFIGURE_DEPENDS re-globs at build time, so dropping a file (or a whole script) needs no edit here.

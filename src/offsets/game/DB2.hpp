@@ -117,10 +117,18 @@ namespace wxl::offsets::game::db2
     // -------------------------------------------------------------------------
     namespace chrraces
     {
+        constexpr uintptr_t kStorageObject = 0x00AD3428;
+        constexpr uintptr_t kStorageLoadedFlag = 0x00AD342C;
+        // __thiscall(storage, sourceFile, sourceLine), ret 8. The string block is read AFTER
+        // the row/index builder; names are ready only when this loader returns with loaded=1.
+        constexpr uintptr_t kLoader         = 0x0063AB00;
+        constexpr uintptr_t kLoadComplete   = 0x0063AD44;
         constexpr uintptr_t kMinId          = 0x00AD3438; // i32 minimum race id in the table
         constexpr uintptr_t kMaxId          = 0x00AD3434; // i32 maximum race id
         constexpr uintptr_t kIdTable        = 0x00AD3448; // record* table, indexed by (id - minId)
         constexpr size_t    kOffRecordPrefix= 0x18;       // char* -> NUL-terminated 2-char race code (e.g. "Hu")
+        // Disk field 11, relocated by 0x8ACDC7; GetAvailableRaces reads it at 0x4E190E.
+        constexpr size_t    kOffClientFileString = 0x2C; // char* race/sound token, e.g. "BloodElf"
     }
 
     // -------------------------------------------------------------------------
